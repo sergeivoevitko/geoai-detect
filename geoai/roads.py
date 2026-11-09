@@ -19,7 +19,7 @@ import rasterio.features
 from rasterio.enums import Resampling
 from rasterio.transform import Affine
 from scipy import ndimage
-from shapely.geometry import LineString, Point, box
+from shapely.geometry import LineString, Point, box, shape
 from shapely.ops import polygonize, unary_union
 
 WORK_GSD = 0.4   # m/px working grid for geometry (matches the land-cover model's resolution)
@@ -52,7 +52,7 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
     lines = [ln for ln in samroad.graph_to_lines(nodes, edges, t1) if ln.length > 0]
     H, W = cls_map.shape
     if not lines:
-        return [], np.zeros((H, W), bool)
+        return [], np.zeros((H, W), bool), np.zeros((H, W), bool)
     progress(0.72, "Roads: bridging gaps, measuring width and junctions")
 
     # ------------------------------------------------- 2. working grid (~0.4 m)
@@ -83,7 +83,6 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
     footprint = box(*img.ds.bounds).buffer(-3.0)
     bridges = _bridge_gaps(lines, paved, tw, footprint, opt.bridge_max_gap, occluder)
     lines = _node_network(lines + bridges)
-    bridge_union = unary_union(bridges).buffer(0.5) if bridges else None
     junctions = _junctions(lines)
 
     center = rasterio.features.rasterize([(ln, 1) for ln in lines], out_shape=(Hw, Ww), transform=tw,
@@ -129,89 +128,122 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
     hit = np.unique(lab[center]); hit = hit[hit > 0]
     surface = np.isin(lab, hit)
 
-    # -------------------------------------------------------- 3. roundabouts
-    inside = ndimage.distance_transform_edt(surface).astype(np.float32) * wg   # half-width proxy
-    ring_ids = set()
+    # -------------------------------------------------------- 3. roundabout islands
+    from .centerline import surface_centerlines
     islands = []
-    faces = list(polygonize(unary_union(lines)))
-    for face in faces:
+    # (a) small round loops in the network model's graph
+    inside = ndimage.distance_transform_edt(surface).astype(np.float32) * wg
+    for face in polygonize(unary_union(lines)):
         a = face.area
-        if not (30 <= a <= 6000):
+        if not (30 <= a <= 6000) or 4 * np.pi * a / (face.length ** 2) < 0.7:
             continue
-        compact = 4 * np.pi * a / (face.length ** 2)
-        if compact < 0.7:
-            continue
-        # half width along the ring
         hw = _median_at(inside, tw, _sample_line(LineString(face.exterior.coords), 3.0))
         island = face.buffer(-max(hw, 1.5))
-        if island.is_empty or island.area < 5:
+        if not island.is_empty and island.area >= 5:
+            islands.append(island)
+    # (b) compact non-road patches enclosed by road (catches islands the core corridor painted over)
+    enclosed = ndimage.binary_fill_holes(surface) & ~(paved | shadow)
+    enclosed |= ndimage.binary_fill_holes(surface) & ~surface
+    lab_i, ni = ndimage.label(enclosed)
+    for k, sl in enumerate(ndimage.find_objects(lab_i), start=1):
+        if sl is None:
             continue
-        islands.append(island)
-        for i, ln in enumerate(lines):
-            if ln.within(face.buffer(1.0)) or face.exterior.buffer(1.0).contains(ln):
-                ring_ids.add(i)
+        blob = lab_i == k
+        area = blob.sum() * wg * wg
+        if not (15 <= area <= 3000):
+            continue
+        perim = (blob ^ ndimage.binary_erosion(blob)).sum() * wg
+        if perim == 0 or 4 * np.pi * area / (perim ** 2) < 0.55:
+            continue
+        ring = ndimage.binary_dilation(blob, iterations=max(1, int(3 / wg))) & ~blob
+        if (surface[ring]).mean() < 0.8:        # must be (almost) surrounded by road
+            continue
+        for geom, v in rasterio.features.shapes(blob.astype(np.uint8), mask=blob, transform=tw):
+            islands.append(shape(geom))
+    im = None
     if islands:
         im = rasterio.features.rasterize([(g, 1) for g in islands], out_shape=(Hw, Ww), transform=tw,
                                          dtype=np.uint8).astype(bool)
         surface &= ~im
-        inside = ndimage.distance_transform_edt(surface).astype(np.float32) * wg
+    inside = ndimage.distance_transform_edt(surface).astype(np.float32) * wg
 
-    # ------------------------------------------- 4. per-segment width + agreement
-    progress(0.85, "Roads: scoring segments")
-    inv1 = ~t1
-    feats = []
+    # ------------------------------ 4. widths of the network, continue roads under trees/shadows
     occl_corr = []
-    for i, ln in enumerate(lines):
+    for ln in lines:
         pts = _sample_line(ln, 2.0)
         hws = _values_at(inside, tw, pts)
-        # occlusion (trees, shadows) only ever narrows the visible road, so use an upper
-        # percentile of the half-widths as the segment's true width
+        occl = float(np.mean(_values_at(occluder.astype(np.float32), tw, pts))) if pts else 0.0
+        width = float(2 * np.percentile(hws, 75)) if len(hws) else 0.0
+        if occl > 0.05 and width > 0:
+            occl_corr.append((ln, min(max(width / 2, opt.road_min_half_width), opt.road_wide_half_width)))
+    if occl_corr and not os.environ.get("GEOAI_NO_OCCL"):
+        cm = rasterio.features.rasterize([(ln.buffer(hw, cap_style=2), 1) for ln, hw in occl_corr],
+                                         out_shape=(Hw, Ww), transform=tw, dtype=np.uint8).astype(bool)
+        surface |= cm & occluder
+        if im is not None:
+            surface &= ~im
+    inside = ndimage.distance_transform_edt(surface).astype(np.float32) * wg
+
+    # ------------- 5. final centerlines = medial axis of the surface (rings, one line per carriageway)
+    progress(0.85, "Roads: tracing centerlines and scoring segments")
+    clines = surface_centerlines(surface, tw, wg, min_spur_m=opt.spur_min_m)
+    # a roundabout centerline runs around its island at about half the ring's width
+    island_zone = unary_union([g.buffer(max(6.0, min(14.0, np.sqrt(g.area / np.pi))))
+                               for g in islands if g.area >= 15]) if islands else None
+    bridge_zone = unary_union(bridges).buffer(opt.road_wide_half_width) if bridges else None
+    inv1 = ~t1
+    feats = []
+    for ln in clines:
+        pts = _sample_line(ln, 2.0)
+        hws = _values_at(inside, tw, pts)
         width = float(2 * np.percentile(hws, 75)) if len(hws) else 0.0
         occl = float(np.mean(_values_at(occluder.astype(np.float32), tw, pts))) if pts else 0.0
-        # SAM-Road road probability along the line (1 m grid)
         sr = []
         for p in pts:
             c, r = inv1 * (p.x, p.y)
             r, c = int(r), int(c)
             if 0 <= r < road_prob.shape[0] and 0 <= c < road_prob.shape[1]:
-                sr.append(float(road_prob[max(0, r - 1):r + 2, max(0, c - 1):c + 2].max()))
+                sr.append(float(road_prob[max(0, r - 2):r + 3, max(0, c - 2):c + 3].max()))
         p_sr = float(np.clip(np.mean(sr) / 0.5, 0, 1)) if sr else 0.0
-        # land-cover agreement: is the ground under the centerline paved?
         p_lc = float(np.mean(_values_at(paved.astype(np.float32), tw, pts))) if pts else 0.0
         cv = float(np.std(hws) / (np.mean(hws) + 1e-6)) if len(hws) > 2 else 0.0
         s_w = float(np.clip(1 - cv, 0, 1))
-        agree = 0.4 * p_sr + 0.4 * p_lc + 0.2 * s_w
-        # hidden road is inferred, not seen: lower agreement is expected there
-        p_lc_eff = max(p_lc, min(1.0, p_lc + occl))
+        p_lc_eff = min(1.0, p_lc + occl)       # hidden road is inferred, not seen
         agree = 0.4 * p_sr + 0.4 * p_lc_eff + 0.2 * s_w
         review = int(agree < opt.review_threshold or p_lc_eff < 0.4)
+        if island_zone is not None and ln.within(island_zone):
+            kind = "roundabout"
+        elif bridge_zone is not None and ln.intersection(bridge_zone).length > 0.6 * ln.length and p_lc < 0.5:
+            kind = "gap_fill"
+        else:
+            kind = "road"
         feats.append({
-            "geometry": ln.simplify(gsd * 2),
+            "geometry": ln,
             "score": round(agree, 3),
-            "attrs": {"width_m": round(width, 1),
-                      "kind": "roundabout" if i in ring_ids else
-                              ("gap_fill" if bridge_union is not None and ln.within(bridge_union) else "road"),
-                      "agree": round(agree, 3), "p_samroad": round(p_sr, 3), "p_landcov": round(p_lc, 3),
+            "attrs": {"width_m": round(width, 1), "kind": kind, "agree": round(agree, 3),
+                      "p_samroad": round(p_sr, 3), "p_landcov": round(p_lc, 3),
                       "occluded": round(occl, 3), "review": review},
         })
-        if occl > 0.05 and width > 0:
-            occl_corr.append((ln, min(max(width / 2, opt.road_min_half_width), opt.road_wide_half_width)))
 
-    # continue each road at its measured width under trees / shadows ("as if the tree were not there")
-    if occl_corr and not os.environ.get("GEOAI_NO_OCCL"):
-        cm = rasterio.features.rasterize([(ln.buffer(hw, cap_style=2), 1) for ln, hw in occl_corr],
-                                         out_shape=(Hw, Ww), transform=tw, dtype=np.uint8).astype(bool)
-        surface |= cm & occluder
-        if islands:
-            surface &= ~im
+    # ------------------------------------------- 6. carriageway vs sidewalk (optional)
+    sidewalk = np.zeros_like(surface)
+    if getattr(opt, "sidewalks", False) and clines:
+        from .sidewalk import split
+        progress(0.93, "Roads: separating carriageway and sidewalks")
+        dev = (cw == idx_of["developed_space"]) if "developed_space" in idx_of else np.zeros_like(road_c)
+        surface, sidewalk = split(rgbw[:Hw, :Ww], surface, clines, tw, wg, building, tree, shadow,
+                                  road_c, dev, sidewalk_max_m=opt.sidewalk_max_m)
 
-    # ----------------------------------------------- 5. back to native resolution
-    if f > 1:
-        surface = np.repeat(np.repeat(surface, f, 0), f, 1)[:H, :W]
-        if surface.shape != (H, W):
-            pad = np.zeros((H, W), bool); pad[:surface.shape[0], :surface.shape[1]] = surface; surface = pad
+    # ----------------------------------------------- 7. back to native resolution
+    def up(mk):
+        if f == 1:
+            return mk
+        u = np.repeat(np.repeat(mk, f, 0), f, 1)[:H, :W]
+        if u.shape != (H, W):
+            pad = np.zeros((H, W), bool); pad[:u.shape[0], :u.shape[1]] = u; u = pad
+        return u
     progress(1.0, "Roads done")
-    return feats, surface
+    return feats, up(surface), up(sidewalk)
 
 
 def _end_dirs(ln: LineString, look: float = 8.0):

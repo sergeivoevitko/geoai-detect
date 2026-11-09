@@ -12,7 +12,7 @@ from scipy import ndimage
 # Classes treated as continuous surfaces (dissolved into connected regions)
 # rather than countable instances.
 STUFF_CLASSES = {"road", "roads", "tree", "trees", "forest", "vegetation", "grass",
-                 "water", "river", "field", "farmland", "parking lot", "sidewalk",
+                 "water", "river", "field", "farmland", "parking lot", "sidewalk", "sidewalks",
                  "impervious surface", "bare soil", "sand"}
 
 
