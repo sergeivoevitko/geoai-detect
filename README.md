@@ -72,10 +72,18 @@ where the photo shows a real roof edge between the parts.
 
 ## Solar panels
 
-Class `solar panel` (shown in blue). Searched on detected roofs as mid-dark, colour-neutral,
-rectangular patches (solar water-heater collectors and PV modules); roof shadows are rejected by
-colour (they are strongly blue) and parapet shadows by shape. Open-vocabulary detectors boxed whole
-roofs at 15 cm, so they are not used for this class.
+Class `solar panel` (shown in blue). Two detectors, merged:
+
+* **Rules**: mid-dark, colour-neutral rectangles on detected roofs. Finds the small solar
+  water-heater collectors on Israeli roofs; roof and parapet shadows are rejected by colour/shape.
+* **Trained model** (`finloop/yolov8s-seg-solar-panels`, MIT weights, needs the optional
+  `ultralytics` package, AGPL-3.0): finds PV arrays, panels on red-tile roofs and large ground-mounted
+  solar fields (tested on the Ketura field: ~21 ha found, no false hits on the date orchards next to it).
+  The image is resampled to ~20 cm/px for it. Note: its weights file is a pickle that runs code on
+  load; only use weights from a source you trust.
+
+A local vision-language check of solar candidates was tested and rejected: Qwen3-VL 2B/4B answered
+"solar" for almost every dark rectangle on a roof.
 
 ## Local AI verification (optional, no internet needed)
 
