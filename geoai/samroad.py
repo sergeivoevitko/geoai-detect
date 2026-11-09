@@ -51,7 +51,9 @@ def load_samroad():
     # nothing to resize in the empty stand-in; the trained checkpoint holds the
     # already-resized positional embeddings
     SAMRoad.resize_sam_pos_embed = lambda self, sd, *a, **k: sd
-    net = SAMRoad(cfg)
+    import contextlib, io as _io
+    with contextlib.redirect_stdout(_io.StringIO()):   # upstream prints every parameter name
+        net = SAMRoad(cfg)
     # weights_only=True: refuse to unpickle anything but tensors/plain containers, so a
     # tampered checkpoint cannot execute code on load.
     ck = torch.load(hf_hub_download(REPO_ID, CKPT), map_location="cpu", weights_only=True)

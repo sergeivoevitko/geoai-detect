@@ -7,3 +7,6 @@ sample_data/*.tif
 *.ckpt
 *.pth
 .DS_Store
+sample_data/israel/
+*.jpg
+!docs/*.jpg

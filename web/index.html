@@ -25,13 +25,14 @@
       <summary>Fetch from a map service</summary>
       <div class="col">
         <select id="svcType">
+          <option value="wmts">WMTS (GetCapabilities URL)</option>
           <option value="xyz">XYZ / TMS tiles</option>
           <option value="wms">WMS</option>
         </select>
-        <input id="svcUrl" placeholder="https://server/{z}/{x}/{y}.jpg  or WMS base URL">
-        <input id="svcLayer" placeholder="WMS layer name" class="wms-only">
+        <input id="svcUrl" placeholder="WMTS GetCapabilities URL, XYZ template or WMS base URL">
+        <input id="svcLayer" placeholder="layer name (optional for WMTS)" class="wms-only">
         <input id="svcCrs" placeholder="WMS CRS, e.g. EPSG:3857" class="wms-only" value="EPSG:3857">
-        <label class="row">Resolution (m/px) <input id="svcGsd" type="number" step="0.05" value="0.3"></label>
+        <label class="row">Resolution (m/px) <input id="svcGsd" type="number" step="0.05" value="0.15"></label>
         <button id="svcFetch">Fetch current map view</button>
         <p class="hint">Uses the area visible on the map. Check the service's terms allow feature extraction.</p>
       </div>
@@ -84,6 +85,7 @@
     <div id="layers"></div>
     <label class="row"><input type="checkbox" id="showBase" checked> OpenStreetMap basemap</label>
     <label class="row">Image opacity <input id="opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
+    <button id="verify" title="A local vision AI checks every object flagged for review">AI-verify flagged objects</button>
     <button id="export" class="primary">Export Shapefiles (.zip)</button>
     <p class="hint">One .shp per class, in the image's own CRS.</p>
   </section>
