@@ -40,10 +40,13 @@ def _chaikin(coords, iters=2):
 
 
 def surface_centerlines(surface: np.ndarray, transform: Affine, px_m: float,
-                        min_spur_m: float = 6.0, small_hole_m2: float = 25.0) -> list[LineString]:
+                        min_spur_m: float = 6.0, small_hole_m2: float = 60.0, dedupe_m: float = 4.0) -> list[LineString]:
     from skimage.morphology import skeletonize
 
-    m = fill_small_holes(surface, int(small_hole_m2 / (px_m * px_m)))     # cars, markings
+    m = fill_small_holes(surface, int(small_hole_m2 / (px_m * px_m)))     # cars, markings, buses
+    m = _fill_thin_holes(m, max_halfwidth_px=max(1, int(0.8 / px_m)))     # lane markings, kerbs
+    # smooth the outline: ragged edges are what grows skeleton side branches
+    m = ndimage.gaussian_filter(m.astype(np.float32), sigma=max(1.0, 1.0 / px_m)) > 0.5
     m = ndimage.binary_opening(m, iterations=1)
     if not m.any():
         return []
@@ -117,7 +120,7 @@ def surface_centerlines(surface: np.ndarray, transform: Affine, px_m: float,
             a, b, p = e
             dead = (b == 0) or degc.get(a, 0) == 1 or degc.get(b, 0) == 1
             hub = p[0] if degc.get(a, 0) > 1 else p[-1]
-            thr = max(min_spur_m, 1.3 * float(halfw[hub]))
+            thr = max(min_spur_m, 2.0 * float(halfw[hub]))
             border = any(x[0] <= 1 or x[1] <= 1 or x[0] >= H - 2 or x[1] >= W - 2 for x in (p[0], p[-1]))
             if dead and a != b and not border and length(p) < thr and (degc.get(a, 0) > 1 or degc.get(b, 0) > 1):
                 changed = True
@@ -140,4 +143,30 @@ def surface_centerlines(surface: np.ndarray, transform: Affine, px_m: float,
         return []
     merged = linemerge(unary_union(lines))
     out = list(merged.geoms) if hasattr(merged, "geoms") else [merged]
-    return [g for g in out if g.geom_type == "LineString" and g.length > px_m * 3]
+    out = [g for g in out if g.geom_type == "LineString" and g.length > px_m * 3]
+    return _dedupe_parallel(out, dedupe_m)
+
+
+def _fill_thin_holes(mask, max_halfwidth_px: int):
+    """Fill enclosed holes that are thin everywhere (painted markings, kerbs), keep wide ones (medians)."""
+    holes = ndimage.binary_fill_holes(mask) & ~mask
+    lab, n = ndimage.label(holes)
+    if not n:
+        return mask
+    thick = ndimage.maximum(ndimage.distance_transform_edt(holes), lab, range(1, n + 1))
+    thin = np.isin(lab, np.nonzero(np.asarray(thick) <= max_halfwidth_px)[0] + 1)
+    return mask | thin
+
+
+def _dedupe_parallel(lines, tol: float):
+    """Drop a line that runs within `tol` metres of a longer line along most of its length."""
+    if len(lines) < 2:
+        return lines
+    keep = []
+    for ln in sorted(lines, key=lambda g: -g.length):
+        if keep:
+            near = unary_union([k for k in keep if k.distance(ln) < tol])
+            if not near.is_empty and ln.intersection(near.buffer(tol)).length > 0.8 * ln.length:
+                continue
+        keep.append(ln)
+    return keep

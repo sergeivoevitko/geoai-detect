@@ -52,7 +52,7 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
     lines = [ln for ln in samroad.graph_to_lines(nodes, edges, t1) if ln.length > 0]
     H, W = cls_map.shape
     if not lines:
-        return [], np.zeros((H, W), bool), np.zeros((H, W), bool)
+        return [], np.zeros((H, W), bool), np.zeros((H, W), bool), np.zeros((H, W), bool)
     progress(0.72, "Roads: bridging gaps, measuring width and junctions")
 
     # ------------------------------------------------- 2. working grid (~0.4 m)
@@ -83,6 +83,21 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
     footprint = box(*img.ds.bounds).buffer(-3.0)
     bridges = _bridge_gaps(lines, paved, tw, footprint, opt.bridge_max_gap, occluder)
     lines = _node_network(lines + bridges)
+
+    # drop network pieces that are not roads: parking-lot aisles and lines inside planted medians
+    natural = np.zeros_like(road_c)
+    for nm in ("tree_vegetation", "rangeland", "bareland", "agriculture_land", "water"):
+        if nm in idx_of:
+            natural |= cw == idx_of[nm]
+    dev = (cw == idx_of["developed_space"]) if "developed_space" in idx_of else np.zeros_like(road_c)
+    lines, aisles = _filter_network(lines, road_c, dev, natural, shadow, tw)
+    # parking lots: wide paved areas densely filled with parked cars, away from through-roads
+    parking = _parking_by_cars(rgbw[:Hw, :Ww], road_c | dev, building, lines, tw, wg)
+    if aisles:
+        parking |= _parking_areas(aisles, dev | road_c, building, tw, (Hw, Ww), wg)
+    if parking.any():
+        in_pk = lambda ln: np.mean(_values_at(parking.astype(np.float32), tw, _sample_line(ln, 2.0)))
+        lines = [ln for ln in lines if in_pk(ln) < 0.6]
     junctions = _junctions(lines)
 
     center = rasterio.features.rasterize([(ln, 1) for ln in lines], out_shape=(Hw, Ww), transform=tw,
@@ -106,7 +121,7 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
         # (a junction between road arms, a shadow lying across a street). Blobs touching the road on
         # one side only (building shadows, forecourts) are dropped except for a thin edge strip.
         prior = surface.copy()
-        grow_ok = (road_c | (shadow & ~building & ~tree) |
+        grow_ok = (road_c | (shadow & ~building & ~natural) |
                    (paved & ndimage.binary_dilation(road_c, iterations=max(1, int(3 / wg)))))
         grown = ndimage.binary_dilation(prior, iterations=steps, mask=prior | grow_ok)
         added = grown & ~prior
@@ -121,9 +136,14 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
                 pad = tuple(slice(max(0, x.start - 4), x.stop + 4) for x in sl)
                 blob = lab_a[pad] == k
                 touch = ndimage.binary_dilation(blob, iterations=3) & (lab_r[pad] > 0)
-                keep[k] = len(np.unique(lab_r[pad][touch])) >= 2
+                # a planted median also touches two carriageways: reject blobs that are mostly
+                # vegetation / bare ground, or that contain hardly any road pixels
+                nat_frac = natural[pad][blob].mean()
+                road_frac = (road_c[pad][blob] | shadow[pad][blob]).mean()
+                keep[k] = len(np.unique(lab_r[pad][touch])) >= 2 and nat_frac < 0.3 and road_frac > 0.3
             surface = prior | keep[lab_a] | (added & (dist <= opt.road_max_half_width))
     surface = ndimage.binary_closing(surface, iterations=2)
+    surface &= ~parking
     lab, n = ndimage.label(surface)
     hit = np.unique(lab[center]); hit = hit[hit > 0]
     surface = np.isin(lab, hit)
@@ -187,6 +207,9 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
     # ------------- 5. final centerlines = medial axis of the surface (rings, one line per carriageway)
     progress(0.85, "Roads: tracing centerlines and scoring segments")
     clines = surface_centerlines(surface, tw, wg, min_spur_m=opt.spur_min_m)
+    if parking.any():
+        clines = [ln for ln in clines
+                  if np.mean(_values_at(parking.astype(np.float32), tw, _sample_line(ln, 2.0))) < 0.5]
     # a roundabout centerline runs around its island at about half the ring's width
     island_zone = unary_union([g.buffer(max(6.0, min(14.0, np.sqrt(g.area / np.pi))))
                                for g in islands if g.area >= 15]) if islands else None
@@ -243,7 +266,103 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
             pad = np.zeros((H, W), bool); pad[:u.shape[0], :u.shape[1]] = u; u = pad
         return u
     progress(1.0, "Roads done")
-    return feats, up(surface), up(sidewalk)
+    return feats, up(surface), up(sidewalk), up(parking)
+
+
+def _filter_network(lines, road_c, dev, natural, shadow, transform):
+    """Split network lines into roads and parking aisles; drop lines inside planted medians.
+
+    * parking aisle: runs over "developed space" rather than road asphalt and sits in a cluster
+      of similar short segments (the aisle grid of a parking lot)
+    * median line: little road under it, mostly vegetation/bare ground, and running alongside
+      a well-supported road within 25 m (the network model sometimes traces the median itself)
+    """
+    stats = []
+    for ln in lines:
+        pts = _sample_line(ln, 1.5)
+        fr = lambda m: float(np.mean(_values_at(m.astype(np.float32), transform, pts))) if pts else 0.0
+        stats.append((fr(road_c), fr(dev), fr(natural & ~shadow)))
+    strong = [ln for ln, (r, d, n) in zip(lines, stats) if r >= 0.5]
+    strong_zone = unary_union(strong).buffer(25) if strong else None
+    cand_aisle = [i for i, (r, d, n) in enumerate(stats) if r < 0.3 and d >= 0.5 and lines[i].length < 90]
+    aisle_set = set()
+    if cand_aisle:
+        mids = [lines[i].interpolate(0.5, normalized=True) for i in cand_aisle]
+        for a, i in enumerate(cand_aisle):
+            near = sum(1 for b, j in enumerate(cand_aisle) if b != a and mids[a].distance(mids[b]) < 35)
+            if near >= 2:
+                aisle_set.add(i)
+    keep, aisles = [], []
+    for i, (ln, (r, d, n)) in enumerate(zip(lines, stats)):
+        if i in aisle_set:
+            aisles.append(ln)
+            continue
+        if (r < 0.3 and n >= 0.4 and strong_zone is not None and ln not in strong
+                and ln.intersection(strong_zone).length > 0.8 * ln.length):
+            continue                                   # median / verge line
+        keep.append(ln)
+    return keep, aisles
+
+
+def _parking_by_cars(rgb, paved_any, building, lines, transform, px_m,
+                     dens_thr: float = 0.75, through_len: float = 150.0):
+    """Parking lots = paved areas with a high density of parked cars (cars per 100 m2),
+    wide enough not to be a curbside parking lane, and not on a long through-road."""
+    from skimage.color import rgb2lab
+    L = rgb2lab(rgb)[..., 0]
+    bg = ndimage.median_filter(L, size=max(3, int(6 / px_m)))
+    obj = (np.abs(L - bg) > 14) & ndimage.binary_dilation(paved_any, iterations=2)
+    obj = ndimage.binary_opening(obj, iterations=1)
+    lab, n = ndimage.label(obj)
+    cars = np.zeros(L.shape, np.float32)
+    if n:
+        sizes = ndimage.sum(obj, lab, range(1, n + 1)) * px_m * px_m
+        for sz, sl in zip(sizes, ndimage.find_objects(lab)):
+            if sl is None or not (3.5 <= sz <= 22):
+                continue
+            h = (sl[0].stop - sl[0].start) * px_m; w = (sl[1].stop - sl[1].start) * px_m
+            if max(h, w) <= 7.5:
+                cars[(sl[0].start + sl[0].stop) // 2, (sl[1].start + sl[1].stop) // 2] = 1
+    dens = ndimage.gaussian_filter(cars, sigma=8 / px_m) / (px_m * px_m) * 100
+    pk = (dens > dens_thr) & paved_any & ~building
+    through = [ln for ln in lines if ln.length >= through_len]
+    if through:
+        corr = rasterio.features.rasterize([(ln.buffer(10.0), 1) for ln in through], out_shape=L.shape,
+                                           transform=transform, dtype=np.uint8).astype(bool)
+        pk &= ~corr
+    pk = ndimage.binary_opening(pk, iterations=max(1, int(6 / px_m)))     # >= ~12 m wide
+    # fill out the whole lot: grow through connected pavement, stopping at buildings,
+    # greenery and through-road corridors
+    allow = paved_any & ~building
+    if through:
+        allow &= ~corr
+    pk = ndimage.binary_dilation(pk, iterations=max(1, int(25 / px_m)), mask=allow | pk)
+    pk = ndimage.binary_opening(pk, iterations=max(1, int(3 / px_m)))
+    pk = ndimage.binary_closing(pk, iterations=max(1, int(2 / px_m)))
+    lab, n = ndimage.label(pk)
+    if n:
+        sizes = ndimage.sum(pk, lab, range(1, n + 1)) * px_m * px_m
+        pk = np.isin(lab, np.nonzero(sizes >= 400)[0] + 1)
+    return pk
+
+
+def _parking_areas(aisles, paved_any, building, transform, shape_hw, px_m):
+    """Paved area around a cluster of parking aisles."""
+    near = rasterio.features.rasterize([(ln.buffer(12.0), 1) for ln in aisles], out_shape=shape_hw,
+                                       transform=transform, dtype=np.uint8).astype(bool)
+    pk = paved_any & near & ~building
+    pk = ndimage.binary_closing(pk, iterations=max(1, int(2 / px_m)))
+    pk = ndimage.binary_fill_holes(pk)
+    pk = ndimage.binary_opening(pk, iterations=max(1, int(2.5 / px_m)))
+    lab, n = ndimage.label(pk)
+    if not n:
+        return pk
+    aisle_px = rasterio.features.rasterize([(ln, 1) for ln in aisles], out_shape=shape_hw, transform=transform,
+                                           all_touched=True, dtype=np.uint8).astype(bool)
+    sizes = ndimage.sum(pk, lab, range(1, n + 1)) * px_m * px_m
+    hit = set(np.unique(lab[aisle_px & pk])) - {0}
+    ok = [k for k in hit if sizes[k - 1] >= 250]
+    return np.isin(lab, ok)
 
 
 def _end_dirs(ln: LineString, look: float = 8.0):

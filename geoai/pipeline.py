@@ -113,16 +113,19 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
         stuff = is_stuff(label)
         if landcover.landcover_class(label) == "road" and opt.road_graph:
             from .roads import extract_roads
-            cl, mask, side = extract_roads(img, cls_map, idx_of, opt, lambda p, m: progress(0.82 + 0.1 * p, m))
+            cl, mask, side, parking = extract_roads(img, cls_map, idx_of, opt,
+                                                    lambda p, m: progress(0.82 + 0.1 * p, m))
             for c in cl:
                 out.append({"label": f"{label}_centerline", "source": "auto", **c})
-            if side.any():
-                side = clean_mask(side, min_pixels=min_px, close_iter=1)
-                for geom, v in rasterio.features.shapes(side.astype(np.uint8), mask=side,
+            for extra, emask, emin in (("sidewalk", side, 2.0), ("parking", parking, 150.0)):
+                if not emask.any():
+                    continue
+                emask = clean_mask(emask, min_pixels=min_px, close_iter=1)
+                for geom, v in rasterio.features.shapes(emask.astype(np.uint8), mask=emask,
                                                         transform=img.ds.transform, connectivity=8):
                     g = shape(geom).buffer(0)
-                    for it in postprocess("sidewalk", [{"geometry": g, "score": 0.8}], gsd, 2.0, 1.5, False):
-                        out.append({"label": "sidewalk", "geometry": it["geometry"], "score": it["score"],
+                    for it in postprocess(extra, [{"geometry": g, "score": 0.8}], gsd, emin, 1.5, False):
+                        out.append({"label": extra, "geometry": it["geometry"], "score": it["score"],
                                     "source": "auto"})
         mask = clean_mask(mask, min_pixels=min_px, close_iter=2 if stuff else 1)
         if not mask.any():
@@ -132,6 +135,8 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
         if landcover.landcover_class(label) == "building" and opt.refine_buildings:
             items = _refine_buildings_with_sam(img, lab, n, scores,
                                                lambda p, m: progress(0.85 + 0.15 * p, m))
+            from .buildings import split_large
+            items = split_large(img, items)       # touching buildings merged into one blob
         else:
             items = []
             for geom, v in rasterio.features.shapes(lab.astype(np.int32), mask=mask,
