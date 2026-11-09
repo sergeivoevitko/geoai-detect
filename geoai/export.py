@@ -6,6 +6,7 @@ import re
 import zipfile
 
 import geopandas as gpd
+import numpy as np
 
 
 def safe_name(label: str) -> str:
@@ -60,3 +61,60 @@ def zip_shapefiles(shp_paths: list[str], zip_path: str) -> str:
                 if os.path.exists(base + ext):
                     z.write(base + ext, os.path.basename(base + ext))
     return zip_path
+
+
+def _layer_name(label: str) -> str:
+    n = safe_name(label)
+    return n if n[0].isalpha() else "c_" + n
+
+
+def write_layers(features: list[dict], target_crs: str, out_dir: str, name: str,
+                 formats=("gdb",)) -> list[str]:
+    """Write all features, one layer per class, reprojected to target_crs.
+
+    features: dicts with geometry, label, crs (source CRS of that feature), score, source, attrs.
+    formats: "gdb" -> <name>.gdb (File Geodatabase, one feature class per class)
+             "shp" -> <name>_shp/<class>.shp
+    Returns written paths."""
+    import pandas as pd
+    from pyproj import CRS
+    from shapely.ops import transform as stransform
+    from pyproj import Transformer
+
+    os.makedirs(out_dir, exist_ok=True)
+    tcrs = CRS.from_user_input(target_crs)
+    by_class: dict[str, list[dict]] = {}
+    for f in features:
+        by_class.setdefault(f["label"], []).append(f)
+    frames = {}
+    for label, feats in by_class.items():
+        parts = []
+        groups: dict = {}
+        for f in feats:
+            groups.setdefault(f.get("crs"), []).append(f)
+        for crs, group in groups.items():
+            gdf = to_geodataframe(group, crs)
+            if crs and CRS.from_user_input(crs) != tcrs:
+                gdf = gdf.to_crs(tcrs)
+            parts.append(gdf)
+        gdf = pd.concat(parts, ignore_index=True)
+        gdf = gpd.GeoDataFrame(gdf, geometry="geometry", crs=tcrs)
+        gdf["id"] = np.arange(1, len(gdf) + 1, dtype="int32")
+        frames[_layer_name(label)] = gdf
+    written = []
+    if "gdb" in formats:
+        gdb = os.path.join(out_dir, name + ".gdb")
+        if os.path.exists(gdb):
+            import shutil
+            shutil.rmtree(gdb)
+        for lname, gdf in frames.items():
+            gdf.to_file(gdb, layer=lname, driver="OpenFileGDB", engine="pyogrio")
+        written.append(gdb)
+    if "shp" in formats:
+        sdir = os.path.join(out_dir, name + "_shp")
+        os.makedirs(sdir, exist_ok=True)
+        for lname, gdf in frames.items():
+            p = os.path.join(sdir, lname + ".shp")
+            gdf.to_file(p, driver="ESRI Shapefile", engine="pyogrio", encoding="UTF-8")
+        written.append(sdir)
+    return written

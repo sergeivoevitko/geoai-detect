@@ -108,63 +108,39 @@ automatically, or choose explicitly: `--device cpu|cuda|mps` (CLI) / `GEOAI_DEVI
 * XYZ tiles, WMS
 Service URLs that contain a personal key are stored only in your browser, never in the repo.
 
-## Install
+## Install and run on Windows
 
-Requires Python 3.10+. An NVIDIA GPU is strongly recommended (10-50x faster), but CPU works.
+1. Install **Python 3.12** from https://www.python.org/downloads/ (tick *Add python.exe to PATH*).
+2. Download this repository (green *Code* button → *Download ZIP*, or `git clone`) and unzip it.
+3. Double-click **`install.bat`** (one time, ~10 minutes). With an NVIDIA GPU, see the note inside it.
+4. Double-click **`GeoAI Detect.bat`**. The work area opens in its own window.
+   (`GeoAI Detect (console).bat` does the same but keeps a log window open, useful if something fails.)
 
-```bash
-python -m venv .venv
-source .venv/bin/activate            # Windows: .venv\Scripts\activate
-# GPU (CUDA 12.x): pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements.txt
-```
+The AI models (about 6 GB) download automatically the first time a detection runs.
+The window uses Microsoft Edge WebView2, which is built into Windows 10 and 11.
 
-Model weights (about 2.5 GB) download automatically from Hugging Face on first use.
+### The work area
 
-### Optional: SAM 3 (most accurate open-vocabulary model)
+| Step | How |
+|------|-----|
+| **1. Imagery** | **📂 Open image**: any georeferenced GeoTIFF / JP2 / IMG / VRT, opened in place (no copy, any size). **🌐 Add service**: WMTS GetCapabilities URL (e.g. Ofek), WMS or XYZ. Services are shown live on the map; only the rectangle is downloaded, at the resolution you choose (10-50 cm). Several sources can be listed; the radio button picks the one used for detection, checkbox/slider control visibility. |
+| **2. Rectangle** | **⬚ Rectangle** tool (R), drag on the map. The panel shows area, megapixels and an estimated run time. |
+| **3. Detect** | Tick what to detect: Buildings, Roads (with Centerlines, Sidewalks, Parking lots), Trees, Solar panels, or type any other object. **▶ Run detection**; progress and Cancel are shown. Results are cut to the rectangle (buildings/panels kept whole). |
+| **4. Review** | Click an object for its attributes. **🎯 Click-add** (P) / **▣ Box-add** (B) add a missed object with real-time AI, **🗑 Delete** (D) removes one. Every run is listed and can be zoomed to or deleted. |
+| **5. Export** | **⬇ Export**: File Geodatabase (.gdb, one feature class per class) and/or Shapefiles, in the imagery's CRS, ITM (EPSG:2039), WGS84 or any EPSG code; choose layers and the output folder. |
 
-1. Request access at https://huggingface.co/facebook/sam3 (free; Meta reviews requests).
-2. Create a read token at https://huggingface.co/settings/tokens
-3. `export HF_TOKEN=hf_...` before starting the app. It is then used automatically for
-   classes the land-cover model does not cover, and offered as an engine in the UI.
+Results, sources and the rectangle are kept between sessions (folder `workspace/`).
+Service URLs with personal keys stay on your computer only.
 
-## Use
-
-### Web app
-
-```bash
-uvicorn server.app:app --host 127.0.0.1 --port 8000
-```
-
-Open http://127.0.0.1:8000:
-
-1. **Imagery**: upload a GeoTIFF, or pan the map and fetch from an XYZ/WMS service.
-2. **Detect**: choose classes (add your own), then press *Detect objects*.
-3. **Refine**: *Click* tool (P), *Box* tool (B), *Delete* tool (S). Enter accepts, Esc clears.
-4. **Export**: downloads a .zip with `building.shp`, `road.shp`, `tree.shp`, …
-
-### Command line
+### Other ways to run
 
 ```bash
-python cli.py image.tif --classes building road tree --out results/
-python cli.py image.tif --classes car "solar panel" --engine gdino_sam2 --threshold 0.35
-python cli.py --xyz "https://server/{z}/{x}/{y}.jpg" --bbox W S E N --gsd 0.3 --classes building
+python run_app.py --browser          # work area in the web browser instead of a window
+python run_app.py --device cuda      # force GPU (default: auto)
+python cli.py image.tif --classes building road tree "solar panel" --out results/   # batch, no GUI
 ```
 
-### Measure accuracy
-
-```bash
-python evaluate.py results/image_building.shp my_reference_buildings.shp --image image.tif
-```
-
-Reports area IoU / precision / recall / F1 and object-level F1 (IoU >= 0.5 match).
-
-## Third-party code
-
-`third_party/sam_road` is vendored from https://github.com/htcr/sam_road (MIT) and its SAM
-submodule https://github.com/htcr/segment-anything-road (Apache-2.0). Weights:
-https://huggingface.co/congrui/sam_road (trained on 1 m/px US imagery; images are resampled to 1 m
-for it). Checkpoints are loaded with `torch.load(weights_only=True)`.
+On Linux/macOS: `python -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/python run_app.py`.
 
 ## Shapefile attributes
 
