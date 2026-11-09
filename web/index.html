@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GeoAI Detect</title>
+<link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<aside id="panel">
+  <header>
+    <h1>GeoAI Detect</h1>
+    <p class="sub">Aerial object detection → Shapefile</p>
+  </header>
+
+  <section>
+    <h2>1. Imagery</h2>
+    <label class="file">
+      <input type="file" id="upload" accept=".tif,.tiff,.jp2,.img,.vrt">
+      <span>Upload GeoTIFF…</span>
+    </label>
+    <select id="imageSelect"><option value="">— or pick a loaded image —</option></select>
+    <details>
+      <summary>Fetch from a map service</summary>
+      <div class="col">
+        <select id="svcType">
+          <option value="xyz">XYZ / TMS tiles</option>
+          <option value="wms">WMS</option>
+        </select>
+        <input id="svcUrl" placeholder="https://server/{z}/{x}/{y}.jpg  or WMS base URL">
+        <input id="svcLayer" placeholder="WMS layer name" class="wms-only">
+        <input id="svcCrs" placeholder="WMS CRS, e.g. EPSG:3857" class="wms-only" value="EPSG:3857">
+        <label class="row">Resolution (m/px) <input id="svcGsd" type="number" step="0.05" value="0.3"></label>
+        <button id="svcFetch">Fetch current map view</button>
+        <p class="hint">Uses the area visible on the map. Check the service's terms allow feature extraction.</p>
+      </div>
+    </details>
+    <div id="imgInfo" class="info"></div>
+  </section>
+
+  <section>
+    <h2>2. Automatic detection</h2>
+    <div id="classChips" class="chips"></div>
+    <div class="row">
+      <input id="newClass" placeholder="add class (e.g. car, solar panel)">
+      <button id="addClass" class="small">+</button>
+    </div>
+    <details>
+      <summary>Settings</summary>
+      <div class="col">
+        <label class="row">Engine
+          <select id="engine"></select>
+        </label>
+        <label class="row">Confidence <input id="thr" type="range" min="0.1" max="0.8" step="0.05" value="0.3"><span id="thrVal">0.30</span></label>
+        <label class="row">Tile size (px) <input id="tileSize" type="number" value="1024" step="128"></label>
+        <label class="row">Min area (m²) <input id="minArea" type="number" value="4" step="1"></label>
+        <label class="row"><input type="checkbox" id="regularize" checked> Square-up building footprints</label>
+        <label class="row"><input type="checkbox" id="replace" checked> Replace previous auto results</label>
+      </div>
+    </details>
+    <button id="detect" class="primary">Detect objects</button>
+    <div id="progress" class="progress hidden"><div></div><span></span></div>
+  </section>
+
+  <section>
+    <h2>3. Real-time AI refinement</h2>
+    <div class="tools" id="tools">
+      <button data-tool="pan" class="active" title="Pan (V)">✋ Pan</button>
+      <button data-tool="point" title="Click object (P). Shift+click = exclude">🎯 Click</button>
+      <button data-tool="box" title="Drag a box around an object (B)">⬚ Box</button>
+      <button data-tool="select" title="Select & delete (S)">🗑 Delete</button>
+    </div>
+    <label class="row">Class for new objects <select id="drawClass"></select></label>
+    <p class="hint" id="toolHint">Pan the map. Pick a tool to segment objects with SAM in real time.</p>
+    <div class="row hidden" id="pointActions">
+      <button id="acceptPts" class="small primary">Accept (Enter)</button>
+      <button id="clearPts" class="small">Clear (Esc)</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>4. Results & export</h2>
+    <div id="layers"></div>
+    <label class="row"><input type="checkbox" id="showBase" checked> OpenStreetMap basemap</label>
+    <label class="row">Image opacity <input id="opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
+    <button id="export" class="primary">Export Shapefiles (.zip)</button>
+    <p class="hint">One .shp per class, in the image's own CRS.</p>
+  </section>
+  <footer id="status"></footer>
+</aside>
+<main id="map"></main>
+<script src="/static/vendor/maplibre-gl.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
