@@ -8,91 +8,172 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<aside id="panel">
-  <header>
-    <h1>GeoAI Detect</h1>
-    <p class="sub">Aerial object detection → Shapefile</p>
-  </header>
+<header id="toolbar">
+  <div class="brand">GeoAI Detect</div>
+  <div class="group">
+    <button id="btnOpenFile" title="Open an image file (GeoTIFF, JP2, IMG, VRT)">📂 Open image</button>
+    <button id="btnAddService" title="Add a WMTS / WMS / XYZ imagery service">🌐 Add service</button>
+  </div>
+  <div class="sep"></div>
+  <div class="group tools" id="tools">
+    <button data-tool="pan" class="active" title="Pan / select (V)">✋ Pan</button>
+    <button data-tool="rect" title="Draw the detection rectangle (R)">⬚ Rectangle</button>
+    <button data-tool="point" title="Add one object by clicking it (P). Shift+click excludes">🎯 Click-add</button>
+    <button data-tool="box" title="Add one object by dragging a box around it (B)">▣ Box-add</button>
+    <button data-tool="delete" title="Delete an object by clicking it (D)">🗑 Delete</button>
+  </div>
+  <div class="sep"></div>
+  <div class="group">
+    <button id="btnZoomAoi" title="Zoom to the rectangle">🔍 Zoom to rectangle</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="group">
+    <button id="btnExport" class="primary" title="Export results to File Geodatabase / Shapefiles">⬇ Export</button>
+  </div>
+</header>
 
-  <section>
-    <h2>1. Imagery</h2>
-    <label class="file">
-      <input type="file" id="upload" accept=".tif,.tiff,.jp2,.img,.vrt">
-      <span>Upload GeoTIFF…</span>
-    </label>
-    <select id="imageSelect"><option value="">— or pick a loaded image —</option></select>
-    <details>
-      <summary>Fetch from a map service</summary>
-      <div class="col">
-        <select id="svcType">
-          <option value="wmts">WMTS (GetCapabilities URL)</option>
-          <option value="xyz">XYZ / TMS tiles</option>
-          <option value="wms">WMS</option>
+<div id="main">
+  <aside id="panel">
+    <section>
+      <h2>Imagery</h2>
+      <div id="sourceList" class="list"><p class="hint">Open an image file or add a service.</p></div>
+    </section>
+
+    <section>
+      <h2>Detection area</h2>
+      <div id="aoiInfo" class="hint">Choose the <b>⬚ Rectangle</b> tool and drag on the map.</div>
+      <label class="row svc-only hidden">Resolution
+        <select id="gsd">
+          <option value="0.1">10 cm</option>
+          <option value="0.15" selected>15 cm</option>
+          <option value="0.2">20 cm</option>
+          <option value="0.3">30 cm</option>
+          <option value="0.5">50 cm</option>
         </select>
-        <input id="svcUrl" placeholder="WMTS GetCapabilities URL, XYZ template or WMS base URL">
-        <input id="svcLayer" placeholder="layer name (optional for WMTS)" class="wms-only">
-        <input id="svcCrs" placeholder="WMS CRS, e.g. EPSG:3857" class="wms-only" value="EPSG:3857">
-        <label class="row">Resolution (m/px) <input id="svcGsd" type="number" step="0.05" value="0.15"></label>
-        <button id="svcFetch">Fetch current map view</button>
-        <p class="hint">Uses the area visible on the map. Check the service's terms allow feature extraction.</p>
+      </label>
+    </section>
+
+    <section>
+      <h2>Detect</h2>
+      <div id="classList" class="checks"></div>
+      <details>
+        <summary>Other object (free text)</summary>
+        <input id="customClass" placeholder="e.g. swimming pool, car">
+        <p class="hint">Uses an open-vocabulary detector. Less accurate than the classes above.</p>
+      </details>
+      <div class="row">
+        <button id="btnRun" class="primary grow">▶ Run detection</button>
+        <button id="btnCancel" class="hidden">Cancel</button>
       </div>
-    </details>
-    <div id="imgInfo" class="info"></div>
-  </section>
+      <div id="progress" class="progress hidden"><div></div><span></span></div>
+    </section>
 
-  <section>
-    <h2>2. Automatic detection</h2>
-    <div id="classChips" class="chips"></div>
-    <div class="row">
-      <input id="newClass" placeholder="add class (e.g. car, solar panel)">
-      <button id="addClass" class="small">+</button>
-    </div>
-    <details>
-      <summary>Settings</summary>
-      <div class="col">
-        <label class="row">Engine
-          <select id="engine"></select>
-        </label>
-        <label class="row">Confidence <input id="thr" type="range" min="0.1" max="0.8" step="0.05" value="0.3"><span id="thrVal">0.30</span></label>
-        <label class="row">Tile size (px) <input id="tileSize" type="number" value="1024" step="128"></label>
-        <label class="row">Min area (m²) <input id="minArea" type="number" value="4" step="1"></label>
-        <label class="row"><input type="checkbox" id="regularize" checked> Square-up building footprints</label>
-        <label class="row"><input type="checkbox" id="replace" checked> Replace previous auto results</label>
-      </div>
-    </details>
-    <button id="detect" class="primary">Detect objects</button>
-    <div id="progress" class="progress hidden"><div></div><span></span></div>
-  </section>
+    <section>
+      <h2>Results</h2>
+      <div id="layerList" class="list"><p class="hint">No results yet.</p></div>
+      <div id="runList" class="list small"></div>
+      <div class="row"><button id="btnClear" class="small">Clear all results</button></div>
+    </section>
+  </aside>
 
-  <section>
-    <h2>3. Real-time AI refinement</h2>
-    <div class="tools" id="tools">
-      <button data-tool="pan" class="active" title="Pan (V)">✋ Pan</button>
-      <button data-tool="point" title="Click object (P). Shift+click = exclude">🎯 Click</button>
-      <button data-tool="box" title="Drag a box around an object (B)">⬚ Box</button>
-      <button data-tool="select" title="Select & delete (S)">🗑 Delete</button>
+  <div id="mapwrap">
+    <div id="map"></div>
+    <div id="toolHint" class="toolhint hidden"></div>
+    <div id="pointActions" class="floating hidden">
+      <span>Click-add:</span>
+      <select id="drawClass"></select>
+      <button id="acceptPts" class="primary small">Add (Enter)</button>
+      <button id="clearPts" class="small">Cancel (Esc)</button>
     </div>
-    <label class="row">Class for new objects <select id="drawClass"></select></label>
-    <p class="hint" id="toolHint">Pan the map. Pick a tool to segment objects with SAM in real time.</p>
-    <div class="row hidden" id="pointActions">
-      <button id="acceptPts" class="small primary">Accept (Enter)</button>
-      <button id="clearPts" class="small">Clear (Esc)</button>
-    </div>
-  </section>
+  </div>
+</div>
 
-  <section>
-    <h2>4. Results & export</h2>
-    <div id="layers"></div>
-    <label class="row"><input type="checkbox" id="showBase" checked> OpenStreetMap basemap</label>
-    <label class="row">Image opacity <input id="opacity" type="range" min="0" max="1" step="0.05" value="1"></label>
-    <button id="verify" title="A local vision AI checks every object flagged for review">AI-verify flagged objects</button>
-    <button id="export" class="primary">Export Shapefiles (.zip)</button>
-    <p class="hint">One .shp per class, in the image's own CRS.</p>
-  </section>
-  <footer id="status"></footer>
-</aside>
-<main id="map"></main>
+<footer id="statusbar">
+  <span id="status">Starting…</span>
+  <span class="spacer"></span>
+  <span id="coords"></span>
+  <span id="device"></span>
+</footer>
+
+<!-- Add service dialog -->
+<dialog id="dlgService">
+  <form method="dialog">
+    <h3>Add imagery service</h3>
+    <label>Type
+      <select id="svcKind">
+        <option value="wmts">WMTS (GetCapabilities URL)</option>
+        <option value="wms">WMS</option>
+        <option value="xyz">XYZ / TMS tiles</option>
+      </select>
+    </label>
+    <label>URL <input id="svcUrl" placeholder="https://…/service?Service=WMTS&Request=GetCapabilities" autocomplete="off"></label>
+    <div class="row wmts-only">
+      <button type="button" id="svcConnect" class="small">Connect</button>
+      <select id="svcLayer" class="grow"></select>
+    </div>
+    <label class="wms-only hidden">Layer name <input id="svcWmsLayer"></label>
+    <label>Display name <input id="svcName" placeholder="optional"></label>
+    <div id="svcSaved" class="list small"></div>
+    <p class="hint">The URL is stored only on this computer. Check that the service's terms allow
+      extracting features from its imagery.</p>
+    <div class="row end">
+      <button value="cancel">Cancel</button>
+      <button id="svcAdd" value="ok" class="primary">Add</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Open file dialog (browser mode fallback) -->
+<dialog id="dlgFile">
+  <form method="dialog">
+    <h3>Open image</h3>
+    <label>Path on this computer <input id="filePath" placeholder="C:\data\orthophoto.tif"></label>
+    <p class="hint">Opens the file in place, any size. Or upload a copy:</p>
+    <input type="file" id="fileUpload" accept=".tif,.tiff,.jp2,.img,.vrt">
+    <div class="row end">
+      <button value="cancel">Cancel</button>
+      <button id="fileOpen" value="ok" class="primary">Open</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Export dialog -->
+<dialog id="dlgExport">
+  <form method="dialog">
+    <h3>Export results</h3>
+    <fieldset>
+      <legend>Format</legend>
+      <label class="check"><input type="checkbox" id="fmtGdb" checked> File Geodatabase (.gdb)</label>
+      <label class="check"><input type="checkbox" id="fmtShp"> Shapefiles (.shp)</label>
+    </fieldset>
+    <label>Coordinate system
+      <select id="expCrs">
+        <option value="source">Same as the imagery</option>
+        <option value="EPSG:2039">Israel TM Grid (ITM, EPSG:2039)</option>
+        <option value="EPSG:4326">WGS84 (EPSG:4326)</option>
+        <option value="EPSG:3857">Web Mercator (EPSG:3857)</option>
+        <option value="custom">Other EPSG code…</option>
+      </select>
+    </label>
+    <input id="expCrsCustom" class="hidden" placeholder="EPSG:32636">
+    <label>Name <input id="expName"></label>
+    <fieldset>
+      <legend>Layers</legend>
+      <div id="expLayers" class="checks"></div>
+    </fieldset>
+    <label class="desktop-only hidden">Folder
+      <div class="row"><input id="expFolder" class="grow" readonly><button type="button" id="expBrowse" class="small">Browse…</button></div>
+    </label>
+    <p id="expMsg" class="hint"></p>
+    <div class="row end">
+      <button value="cancel">Close</button>
+      <button id="expGo" type="button" class="primary">Export</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="/static/vendor/maplibre-gl.js"></script>
+<script src="/static/vendor/proj4.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -10,3 +10,4 @@ sample_data/*.tif
 sample_data/israel/
 *.jpg
 !docs/*.jpg
+workspace/

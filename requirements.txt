@@ -21,3 +21,4 @@ python-multipart
 scikit-image
 networkx
 ultralytics  # optional: trained solar panel model (AGPL-3.0 library)
+pywebview>=5
