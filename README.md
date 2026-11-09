@@ -47,6 +47,21 @@ Delete wrong detections with one click. Edits are saved and included in the expo
   probability, land-cover under the line, width stability). Segments below 0.6 get `review = 1`;
   the web app has a *needs review* list that jumps to each one (✓ ok / delete).
 
+### Centerlines, carriageway and sidewalks
+
+* Centerlines are traced along the middle of the detected road surface (medial axis, side spurs
+  pruned), so roundabouts get a ring around the island and divided roads get one line per carriageway.
+* `road.shp` is the **carriageway** (driving surface incl. parked cars); `sidewalk.shp` holds the
+  paved strips (up to 4.5 m) along it. The split uses the land-cover model's "road" vs
+  "developed space" classes. Parking lanes are sometimes labelled sidewalk.
+
+## Solar panels
+
+Class `solar panel` (shown in blue). Searched on detected roofs as mid-dark, colour-neutral,
+rectangular patches (solar water-heater collectors and PV modules); roof shadows are rejected by
+colour (they are strongly blue) and parapet shadows by shape. Open-vocabulary detectors boxed whole
+roofs at 15 cm, so they are not used for this class.
+
 ## Local AI verification (optional, no internet needed)
 
 `python cli.py image.tif --classes road --verify` or the *AI-verify flagged objects* button.

@@ -30,6 +30,9 @@ class DetectOptions:
     junction_radius: float = 15.0      # m, intersections: fill paved pixels within this radius
     bridge_max_gap: float = 70.0       # m, join road ends across paved gaps up to this length
     road_grow_max: float = 60.0        # m, grow road surface through connected road pixels
+    spur_min_m: float = 6.0            # m, prune centerline side-branches shorter than this
+    sidewalks: bool = True             # split road surface into carriageway + sidewalk
+    sidewalk_max_m: float = 4.5        # m, widest sidewalk strip considered
     review_threshold: float = 0.6      # segments with lower agreement are flagged for review
     threshold: float = 0.3
     tile_size: int = 1024
@@ -41,6 +44,7 @@ class DetectOptions:
 
 
 ProgressFn = Callable[[float, str], None]
+SOLAR_NAMES = {"solar panel", "solar panels", "solar", "pv", "photovoltaic", "solar water heater"}
 
 
 def _edge_cut(mask: np.ndarray, touches: tuple, margin: int = 4) -> bool:
@@ -63,15 +67,30 @@ def detect_image(img: GeoImage, opt: DetectOptions, progress: ProgressFn | None 
     t0 = time.time()
     features: list[dict] = []
     lc_classes, ov_classes = [], list(opt.classes)
+    solar_classes = []
     if opt.engine == "hybrid":
+        solar_classes = [c for c in opt.classes if c.strip().lower() in SOLAR_NAMES]
         lc_classes = [c for c in opt.classes if landcover.landcover_class(c)]
-        ov_classes = [c for c in opt.classes if not landcover.landcover_class(c)]
+        ov_classes = [c for c in opt.classes if not landcover.landcover_class(c) and c not in solar_classes]
+        if solar_classes and not any(landcover.landcover_class(c) == "building" for c in lc_classes):
+            lc_classes.append("building")          # panels are searched on detected roofs
+            drop_buildings = True
+        else:
+            drop_buildings = False
     ov_engine = opt.engine if opt.engine != "hybrid" else ("sam3" if opt.sam3_ok else "gdino_sam2")
     share = len(lc_classes) / max(1, len(opt.classes)) if ov_classes else 1.0
 
     if lc_classes:
         features += _detect_landcover(img, opt, lc_classes,
                                       lambda p, m: progress(0.9 * share * p, m))
+    if solar_classes:
+        from .solar import detect_on_roofs
+        roofs = [f["geometry"] for f in features if landcover.landcover_class(f["label"]) == "building"]
+        for it in detect_on_roofs(img, roofs, progress=lambda p, m: progress(0.9 * share, m)):
+            features.append({"label": solar_classes[0], "geometry": it["geometry"], "score": it["score"],
+                             "source": "auto"})
+        if drop_buildings:
+            features = [f for f in features if landcover.landcover_class(f["label"]) != "building"]
     if ov_classes:
         o = DetectOptions(**{**opt.__dict__, "classes": ov_classes, "engine": ov_engine})
         base = 0.9 * share if lc_classes else 0.0
@@ -94,9 +113,17 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
         stuff = is_stuff(label)
         if landcover.landcover_class(label) == "road" and opt.road_graph:
             from .roads import extract_roads
-            cl, mask = extract_roads(img, cls_map, idx_of, opt, lambda p, m: progress(0.82 + 0.1 * p, m))
+            cl, mask, side = extract_roads(img, cls_map, idx_of, opt, lambda p, m: progress(0.82 + 0.1 * p, m))
             for c in cl:
                 out.append({"label": f"{label}_centerline", "source": "auto", **c})
+            if side.any():
+                side = clean_mask(side, min_pixels=min_px, close_iter=1)
+                for geom, v in rasterio.features.shapes(side.astype(np.uint8), mask=side,
+                                                        transform=img.ds.transform, connectivity=8):
+                    g = shape(geom).buffer(0)
+                    for it in postprocess("sidewalk", [{"geometry": g, "score": 0.8}], gsd, 2.0, 1.5, False):
+                        out.append({"label": "sidewalk", "geometry": it["geometry"], "score": it["score"],
+                                    "source": "auto"})
         mask = clean_mask(mask, min_pixels=min_px, close_iter=2 if stuff else 1)
         if not mask.any():
             continue

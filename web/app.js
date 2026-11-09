@@ -1,8 +1,8 @@
 /* GeoAI Detect web client */
 const $ = (s) => document.querySelector(s);
-const PALETTE = ["#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4",
-                 "#46f0f0", "#f032e6", "#bcf60c", "#fabebe", "#008080", "#9a6324"];
-const DEFAULT_CLASSES = ["building", "road", "tree"];
+const PALETTE = ["#911eb4", "#46f0f0", "#bcf60c", "#fabebe", "#008080", "#9a6324",
+                 "#aaffc3", "#808000", "#ffd8b1", "#000075", "#808080", "#e6beff"];
+const DEFAULT_CLASSES = ["building", "road", "tree", "solar panel"];
 
 const state = {
   image: null,               // current image info
@@ -14,7 +14,12 @@ const state = {
   busy: false,
 };
 
+const FIXED_COLORS = {
+  building: "#e6194b", road: "#f58231", road_centerline: "#ffe119", sidewalk: "#b06cff",
+  tree: "#2fbf4a", "solar panel": "#1e5bff", water: "#00b7ff", car: "#f032e6",
+};
 function colorFor(name) {
+  if (FIXED_COLORS[name]) return FIXED_COLORS[name];
   const all = Array.from(new Set([...DEFAULT_CLASSES, ...state.classes.map(c => c.name),
     ...state.features.features.map(f => f.properties.class)]));
   return PALETTE[all.indexOf(name) % PALETTE.length];
