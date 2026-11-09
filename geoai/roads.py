@@ -437,10 +437,8 @@ def _bridge_gaps(lines, paved, transform, footprint, max_gap: float, occluder=No
 
 def _node_network(lines) -> list[LineString]:
     """Split lines where they cross and merge through degree-2 vertices."""
-    from shapely.ops import linemerge
-    noded = unary_union(lines)
-    merged = linemerge(noded)
-    geoms = list(merged.geoms) if hasattr(merged, "geoms") else [merged]
+    from .vectorize import safe_linemerge
+    geoms = safe_linemerge(unary_union(lines))
     return [g for g in geoms if g.geom_type == "LineString" and g.length > 0.5]
 
 

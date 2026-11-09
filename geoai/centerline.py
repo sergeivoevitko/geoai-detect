@@ -141,8 +141,8 @@ def surface_centerlines(surface: np.ndarray, transform: Affine, px_m: float,
             lines.append(LineString(sm))
     if not lines:
         return []
-    merged = linemerge(unary_union(lines))
-    out = list(merged.geoms) if hasattr(merged, "geoms") else [merged]
+    from .vectorize import safe_linemerge
+    out = safe_linemerge(unary_union(lines))
     out = [g for g in out if g.geom_type == "LineString" and g.length > px_m * 3]
     return _dedupe_parallel(out, dedupe_m)
 

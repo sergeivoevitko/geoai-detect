@@ -165,3 +165,14 @@ def postprocess(label: str, items: list[dict], gsd: float, min_area: float,
             if p.area >= min_area:
                 out.append({"geometry": p, "score": it["score"]})
     return out
+
+
+def safe_linemerge(geom):
+    """shapely.linemerge that also accepts a single LineString / empty geometry."""
+    from shapely.ops import linemerge as _lm
+    if geom.is_empty:
+        return []
+    if geom.geom_type == "LineString":
+        return [geom]
+    m = _lm(geom)
+    return list(m.geoms) if hasattr(m, "geoms") else [m]

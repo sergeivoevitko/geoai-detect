@@ -84,9 +84,14 @@ def detect_image(img: GeoImage, opt: DetectOptions, progress: ProgressFn | None 
         features += _detect_landcover(img, opt, lc_classes,
                                       lambda p, m: progress(0.9 * share * p, m))
     if solar_classes:
-        from .solar import detect_on_roofs
+        from .solar import detect_on_roofs, detect_yolo, merge, yolo_available
         roofs = [f["geometry"] for f in features if landcover.landcover_class(f["label"]) == "building"]
-        for it in detect_on_roofs(img, roofs, progress=lambda p, m: progress(0.9 * share, m)):
+        sol = detect_on_roofs(img, roofs, progress=lambda p, m: progress(0.9 * share, m))
+        if yolo_available():
+            # rules find small water-heater collectors; the trained model finds PV arrays and
+            # panels on red-tile roofs. They overlap only ~50%, so both are used and merged.
+            sol = merge(sol, detect_yolo(img, roofs, progress=lambda p, m: progress(0.9 * share, m)), img.gsd)
+        for it in sol:
             features.append({"label": solar_classes[0], "geometry": it["geometry"], "score": it["score"],
                              "source": "auto"})
         if drop_buildings:

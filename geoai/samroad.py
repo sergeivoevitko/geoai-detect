@@ -182,5 +182,5 @@ def graph_to_lines(nodes: np.ndarray, edges: np.ndarray, transform: Affine) -> l
     for a, b in edges:
         (x0, y0), (x1, y1) = nodes[a], nodes[b]
         segs.append(LineString([transform * (x0 + 0.5, y0 + 0.5), transform * (x1 + 0.5, y1 + 0.5)]))
-    merged = linemerge(unary_union(segs))
-    return list(merged.geoms) if hasattr(merged, "geoms") else [merged]
+    from .vectorize import safe_linemerge
+    return safe_linemerge(unary_union(segs))
