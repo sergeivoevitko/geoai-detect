@@ -16,7 +16,7 @@ const state = {
 
 const FIXED_COLORS = {
   building: "#e6194b", road: "#f58231", road_centerline: "#ffe119", sidewalk: "#b06cff",
-  tree: "#2fbf4a", "solar panel": "#1e5bff", water: "#00b7ff", car: "#f032e6",
+  tree: "#2fbf4a", "solar panel": "#1e5bff", water: "#00b7ff", car: "#f032e6", parking: "#8c8c8c",
 };
 function colorFor(name) {
   if (FIXED_COLORS[name]) return FIXED_COLORS[name];

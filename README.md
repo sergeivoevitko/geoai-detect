@@ -55,6 +55,21 @@ Delete wrong detections with one click. Edits are saved and included in the expo
   paved strips (up to 4.5 m) along it. The split uses the land-cover model's "road" vs
   "developed space" classes. Parking lanes are sometimes labelled sidewalk.
 
+### Parking lots, medians, wide boulevards
+
+* `parking.shp`: paved areas densely filled with parked cars (car-density map from the image),
+  at least ~12 m wide and away from through-roads; also seeded by clusters of short "aisle" lines.
+  Parking areas are removed from the road surface and get no centerlines.
+* Planted medians: road growth may not enter areas that are mostly vegetation or bare ground, and
+  network lines running inside a median next to a real road are dropped.
+* Wide roads: the surface is smoothed and thin painted markings filled before tracing, side branches
+  shorter than ~2x the road half-width are pruned, and near-duplicate parallel lines are removed.
+
+## Large building complexes
+
+Footprints over 1200 m² are split with a watershed on the image gradient; a split is kept only
+where the photo shows a real roof edge between the parts.
+
 ## Solar panels
 
 Class `solar panel` (shown in blue). Searched on detected roofs as mid-dark, colour-neutral,
