@@ -30,6 +30,9 @@ class DetectOptions:
     junction_radius: float = 15.0      # m, intersections: fill paved pixels within this radius
     bridge_max_gap: float = 70.0       # m, join road ends across paved gaps up to this length
     road_grow_max: float = 60.0        # m, grow road surface through connected road pixels
+    road_fine: str = "auto"            # second road pass at finer resolution: auto | always | never
+    road_fine_gsd: float = 0.5         # m/px of the fine pass
+    dense_building_frac: float = 0.3   # "auto": run the fine pass when buildings cover more than this
     spur_min_m: float = 6.0            # m, prune centerline side-branches shorter than this
     sidewalks: bool = True             # split road surface into carriageway + sidewalk
     sidewalk_max_m: float = 4.5        # m, widest sidewalk strip considered
@@ -140,8 +143,10 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
         if landcover.landcover_class(label) == "building" and opt.refine_buildings:
             items = _refine_buildings_with_sam(img, lab, n, scores,
                                                lambda p, m: progress(0.85 + 0.15 * p, m))
-            from .buildings import split_large
-            items = split_large(img, items)       # touching buildings merged into one blob
+            from .buildings import split_large, split_with_sam
+            # touching buildings merged into one blob: SAM roof-by-roof first, edge split after
+            items = split_with_sam(img, items, progress=lambda p, m: progress(0.85 + 0.15 * p, m))
+            items = split_large(img, items, min_area=1200.0)
         else:
             items = []
             for geom, v in rasterio.features.shapes(lab.astype(np.int32), mask=mask,

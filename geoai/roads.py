@@ -50,6 +50,27 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
     road_prob, nodes, edges, _ = samroad.infer(rgb1, progress=lambda p, m: progress(0.7 * p, m))
     t1 = img.ds.transform * Affine.scale(img.ds.width / W1, img.ds.height / H1)
     lines = [ln for ln in samroad.graph_to_lines(nodes, edges, t1) if ln.length > 0]
+
+    # Dense towns: streets of 4-6 m between attached buildings are only a few pixels wide at the
+    # model's native 1 m/px and get lost. Run it a second time at finer resolution and add the
+    # streets the first pass did not find.
+    bfrac = float((cls_map[::8, ::8] == idx_of.get("building", 254)).mean())
+    if opt.road_fine == "always" or (opt.road_fine == "auto" and bfrac > opt.dense_building_frac):
+        s2 = gsd / opt.road_fine_gsd
+        W2, H2 = max(1, int(round(img.ds.width * s2))), max(1, int(round(img.ds.height * s2)))
+        arr2 = img.ds.read(list(img.bands), out_shape=(3, H2, W2), resampling=Resampling.average, masked=True)
+        d2 = np.ma.filled(arr2, 0).astype(np.float32)
+        if img._stretch is not None:
+            lo, hi = img._stretch
+            d2 = (d2 - lo[:, None, None]) / np.maximum(hi - lo, 1e-6)[:, None, None] * 255
+        rgb2 = np.clip(d2, 0, 255).astype(np.uint8).transpose(1, 2, 0)
+        _, n2, e2, _ = samroad.infer(rgb2, progress=lambda p, m: progress(0.7 * p, m + " (fine pass)"))
+        t2 = img.ds.transform * Affine.scale(img.ds.width / W2, img.ds.height / H2)
+        fine = unary_union([ln for ln in samroad.graph_to_lines(n2, e2, t2) if ln.length > 0])
+        if not fine.is_empty:
+            new = fine.difference(unary_union(lines).buffer(4.0)) if lines else fine
+            from .vectorize import safe_linemerge
+            lines += [g for g in safe_linemerge(new) if g.length >= 8.0]
     H, W = cls_map.shape
     if not lines:
         return [], np.zeros((H, W), bool), np.zeros((H, W), bool), np.zeros((H, W), bool)
@@ -170,13 +191,15 @@ def extract_roads(img, cls_map: np.ndarray, idx_of: dict, opt, progress) -> tupl
             continue
         blob = lab_i == k
         area = blob.sum() * wg * wg
-        if not (15 <= area <= 3000):
+        if not (15 <= area <= 1500):
             continue
         perim = (blob ^ ndimage.binary_erosion(blob)).sum() * wg
         if perim == 0 or 4 * np.pi * area / (perim ** 2) < 0.55:
             continue
         ring = ndimage.binary_dilation(blob, iterations=max(1, int(3 / wg))) & ~blob
         if (surface[ring]).mean() < 0.8:        # must be (almost) surrounded by road
+            continue
+        if building[blob].mean() > 0.15:        # a block with houses on it, not a traffic island
             continue
         for geom, v in rasterio.features.shapes(blob.astype(np.uint8), mask=blob, transform=tw):
             islands.append(shape(geom))
@@ -340,10 +363,27 @@ def _parking_by_cars(rgb, paved_any, building, lines, transform, px_m,
     pk = ndimage.binary_opening(pk, iterations=max(1, int(3 / px_m)))
     pk = ndimage.binary_closing(pk, iterations=max(1, int(2 / px_m)))
     lab, n = ndimage.label(pk)
-    if n:
-        sizes = ndimage.sum(pk, lab, range(1, n + 1)) * px_m * px_m
-        pk = np.isin(lab, np.nonzero(sizes >= 400)[0] + 1)
-    return pk
+    if not n:
+        return pk
+    # A lot is a compact paved area off the street. Reject street-shaped strips and areas the
+    # road network runs through (junctions and streets lined with parked cars).
+    near_net = np.zeros(L.shape, bool)
+    if lines:
+        near_net = rasterio.features.rasterize([(ln.buffer(6.0), 1) for ln in lines], out_shape=L.shape,
+                                               transform=transform, dtype=np.uint8).astype(bool)
+    keep = []
+    for k, sl in enumerate(ndimage.find_objects(lab), start=1):
+        blob = lab[sl] == k
+        area = blob.sum() * px_m * px_m
+        if area < 400:
+            continue
+        if near_net[sl][blob].mean() > 0.35:
+            continue
+        thick = ndimage.distance_transform_edt(blob).max() * px_m      # half of the widest part
+        if thick < 9.0 or area / (2 * thick) / (2 * thick) > 6:          # thin or very elongated
+            continue
+        keep.append(k)
+    return np.isin(lab, keep)
 
 
 def _parking_areas(aisles, paved_any, building, transform, shape_hw, px_m):

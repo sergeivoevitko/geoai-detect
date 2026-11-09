@@ -243,3 +243,25 @@ def _nms(boxes, scores, thr):
         iou = inter / (a[i] + a[order[1:]] - inter + 1e-9)
         order = order[1:][iou < thr]
     return boxes[keep], scores[keep]
+
+
+@torch.inference_mode()
+def sam2_points_batch(rgb: np.ndarray, key, points, batch: int = 64):
+    """One object per point (single positive click each). Returns (masks NxHxW bool, scores N)."""
+    sproc, smodel = load_sam2()
+    emb, orig = _cache.get(key, rgb)
+    masks, scores = [], []
+    for i in range(0, len(points), batch):
+        pts = [[list(map(float, p))] for p in points[i:i + batch]]   # object level -> one point
+        inputs = sproc(input_points=[pts], input_labels=[[[1]] * len(pts)], original_sizes=orig.tolist(),
+                       return_tensors="pt")
+        with _lock:
+            out = smodel(input_points=inputs["input_points"].to(DEVICE),
+                         input_labels=inputs["input_labels"].to(DEVICE),
+                         image_embeddings=emb, multimask_output=True)
+        m = sproc.post_process_masks(out.pred_masks.cpu(), orig.cpu())[0]     # (n,3,H,W)
+        iou = out.iou_scores[0].cpu().numpy()                                  # (n,3)
+        best = iou.argmax(1)
+        for j in range(m.shape[0]):
+            masks.append(m[j, best[j]].numpy().astype(bool)); scores.append(float(iou[j, best[j]]))
+    return np.array(masks), np.array(scores)
