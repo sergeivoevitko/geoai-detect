@@ -88,7 +88,8 @@ def detect_image(img: GeoImage, opt: DetectOptions, progress: ProgressFn | None 
                                       lambda p, m: progress(0.9 * share * p, m))
     if solar_classes:
         from .solar import detect_on_roofs, detect_yolo, merge, yolo_available
-        roofs = [f["geometry"] for f in features if landcover.landcover_class(f["label"]) == "building"]
+        roofs = [f["geometry"] for f in features if f["label"] == "__roof_raw"] or \
+                [f["geometry"] for f in features if landcover.landcover_class(f["label"]) == "building"]
         sol = detect_on_roofs(img, roofs, progress=lambda p, m: progress(0.9 * share, m))
         if yolo_available():
             # rules find small water-heater collectors; the trained model finds PV arrays and
@@ -99,6 +100,7 @@ def detect_image(img: GeoImage, opt: DetectOptions, progress: ProgressFn | None 
                              "source": "auto"})
         if drop_buildings:
             features = [f for f in features if landcover.landcover_class(f["label"]) != "building"]
+    features = [f for f in features if f["label"] != "__roof_raw"]
     if ov_classes:
         o = DetectOptions(**{**opt.__dict__, "classes": ov_classes, "engine": ov_engine})
         base = 0.9 * share if lc_classes else 0.0
@@ -143,6 +145,11 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
         if landcover.landcover_class(label) == "building" and opt.refine_buildings:
             items = _refine_buildings_with_sam(img, lab, n, scores,
                                                lambda p, m: progress(0.85 + 0.15 * p, m))
+            # full building area before splitting: used as the search area for solar panels, so
+            # roof edges that the roof-by-roof split leaves out are still searched
+            for it in items:
+                out.append({"label": "__roof_raw", "geometry": it["geometry"], "score": it["score"],
+                            "source": "auto"})
             from .buildings import split_large, split_with_sam
             # touching buildings merged into one blob: SAM roof-by-roof first, edge split after
             items = split_with_sam(img, items, progress=lambda p, m: progress(0.85 + 0.15 * p, m))
