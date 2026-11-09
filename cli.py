@@ -12,6 +12,13 @@ import os
 import sys
 import time
 
+# --device must be applied before the AI libraries load
+for _i, _a in enumerate(sys.argv):
+    if _a == "--device" and _i + 1 < len(sys.argv):
+        os.environ["GEOAI_DEVICE"] = sys.argv[_i + 1]
+    elif _a.startswith("--device="):
+        os.environ["GEOAI_DEVICE"] = _a.split("=", 1)[1]
+
 from geoai.export import export_shapefiles
 from geoai.pipeline import DetectOptions, detect_image
 from geoai.raster import GeoImage
@@ -28,6 +35,9 @@ def main():
     ap.add_argument("--min-area", type=float, default=4.0, help="minimum polygon area in m²")
     ap.add_argument("--no-regularize", action="store_true", help="keep raw building outlines")
     ap.add_argument("--fast", action="store_true", help="skip test-time augmentation (4x faster, slightly less accurate)")
+    ap.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto",
+                    help="cpu, cuda (NVIDIA GPU), mps (Apple GPU); auto picks the best available")
+    ap.add_argument("--verify", action="store_true", help="run local AI (VLM) verification on flagged roads")
     ap.add_argument("--out", default="outputs/cli")
     ap.add_argument("--xyz", help="XYZ tile URL template instead of a file")
     ap.add_argument("--bbox", nargs=4, type=float, metavar=("W", "S", "E", "N"), help="WGS84 bbox for --xyz")
@@ -57,6 +67,10 @@ def main():
     t0 = time.time()
     feats = detect_image(img, opt, lambda p, m: print(f"\r[{p*100:5.1f}%] {m}".ljust(60), end="", flush=True))
     print()
+    if a.verify:
+        from geoai.verify import verify_features
+        n = verify_features(img, feats, progress=lambda p, m: print(f"\r{m}".ljust(60), end="", flush=True))
+        print(f"\nAI-verified {n} flagged features")
     prefix = os.path.splitext(os.path.basename(path))[0] + "_"
     for shp in export_shapefiles(feats, img.crs, a.out, prefix):
         print("wrote", shp)

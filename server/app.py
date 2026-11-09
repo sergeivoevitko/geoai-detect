@@ -187,7 +187,9 @@ def fetch(req: FetchReq):
     d = os.path.join(UPLOADS, uuid.uuid4().hex[:8]); os.makedirs(d)
     path = os.path.join(d, "service.tif")
     try:
-        if req.type == "wms":
+        if req.type == "wmts":
+            sources.fetch_wmts(req.url, tuple(req.bbox), req.gsd, path, layer=req.layer or None)
+        elif req.type == "wms":
             bb = transform_bounds("EPSG:4326", req.crs, *req.bbox)
             sources.fetch_wms(req.url, req.layer, bb, req.crs, req.gsd, path)
         else:
@@ -198,6 +200,16 @@ def fetch(req: FetchReq):
         shutil.rmtree(d, ignore_errors=True)
         raise HTTPException(400, f"Fetch failed: {e}")
     return image_info(register(path, f"service {req.type} {req.bbox[0]:.4f},{req.bbox[1]:.4f}"))
+
+
+@app.get("/api/wmts/layers")
+def wmts_layers(url: str):
+    try:
+        return [{"id": l["id"], "title": l["title"], "bbox_wgs84": l["bbox_wgs84"],
+                 "levels_m": sorted({round(m["res"], 3) for s in l["sets"].values() if s for m in s["matrices"]})}
+                for l in sources.wmts_layers(url)]
+    except Exception as e:
+        raise HTTPException(400, f"Could not read WMTS capabilities: {e}")
 
 
 @app.get("/api/images/{iid}")
@@ -232,7 +244,7 @@ def features_geojson(iid: str):
     for f in get_features(iid):
         out.append({"type": "Feature", "id": f["fid"],
                     "properties": {"fid": f["fid"], "class": f["label"], "score": round(f["score"], 3),
-                                   "source": f.get("source", "auto")},
+                                   "source": f.get("source", "auto"), **(f.get("attrs") or {})},
                     "geometry": mapping(stransform(tf, f["geometry"]))})
     return {"type": "FeatureCollection", "features": out}
 
@@ -242,6 +254,18 @@ def delete_feature(iid: str, fid: str):
     with _lock:
         items = get_features(iid)
         _features[iid] = [f for f in items if f["fid"] != fid]
+    save_features(iid)
+    return {"ok": True}
+
+
+@app.post("/api/images/{iid}/features/{fid}/accept")
+def accept_feature(iid: str, fid: str):
+    """Reviewer confirmed the feature is correct: clear its review flag."""
+    with _lock:
+        for f in get_features(iid):
+            if f["fid"] == fid:
+                f.setdefault("attrs", {})["review"] = 0
+                f["attrs"]["checked"] = "human"
     save_features(iid)
     return {"ok": True}
 
@@ -301,6 +325,30 @@ def job(jid: str):
     if jid not in _jobs:
         raise HTTPException(404, "job not found")
     return _jobs[jid]
+
+
+@app.post("/api/images/{iid}/verify")
+def start_verify(iid: str, max_items: int = 50):
+    """Local VLM check of every feature flagged for review."""
+    img = get_image(iid)
+    jid = uuid.uuid4().hex[:10]
+    _jobs[jid] = {"status": "running", "progress": 0.0, "message": "Loading local AI verifier…"}
+
+    def run():
+        try:
+            from geoai.verify import verify_features
+            with _lock:
+                feats = get_features(iid)
+            n = verify_features(img, feats, max_items=max_items,
+                                progress=lambda p, m: _jobs[jid].update(progress=p, message=m))
+            save_features(iid)
+            _jobs[jid].update(status="done", progress=1.0, message=f"AI checked {n} flagged objects")
+        except Exception as e:  # noqa
+            import traceback; traceback.print_exc()
+            _jobs[jid].update(status="error", message=f"{type(e).__name__}: {e}")
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": jid}
 
 
 class SegmentReq(BaseModel):

@@ -107,6 +107,112 @@ def fetch_wms(base_url: str, layer: str, bbox: tuple[float, float, float, float]
     return out_path
 
 
+def wmts_layers(capabilities_url: str) -> list[dict]:
+    """List layers and their tile matrix sets from a WMTS GetCapabilities URL."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(_get(capabilities_url, 60))
+    ns = {"w": "http://www.opengis.net/wmts/1.0", "ows": "http://www.opengis.net/ows/1.1"}
+    sets = {}
+    for S in root.findall(".//w:Contents/w:TileMatrixSet", ns):
+        crs = S.findtext("ows:SupportedCRS", namespaces=ns) or ""
+        epsg = "EPSG:" + crs.rstrip("/").split(":")[-1].split("/")[-1]
+        mats = []
+        for m in S.findall("w:TileMatrix", ns):
+            tl = [float(v) for v in m.findtext("w:TopLeftCorner", namespaces=ns).split()]
+            mats.append({
+                "id": m.findtext("ows:Identifier", namespaces=ns),
+                "res": float(m.findtext("w:ScaleDenominator", namespaces=ns)) * 0.00028,  # m/px (projected CRS)
+                "tl": tl, "tw": int(m.findtext("w:TileWidth", namespaces=ns)),
+                "th": int(m.findtext("w:TileHeight", namespaces=ns)),
+                "mw": int(m.findtext("w:MatrixWidth", namespaces=ns)), "mh": int(m.findtext("w:MatrixHeight", namespaces=ns)),
+            })
+        sets[S.findtext("ows:Identifier", namespaces=ns)] = {"crs": epsg, "matrices": mats}
+    get_url = None
+    for op in root.findall(".//ows:Operation", ns):
+        if op.get("name") == "GetTile":
+            g = op.find(".//ows:Get", ns)
+            if g is not None:
+                get_url = g.get("{http://www.w3.org/1999/xlink}href")
+    layers = []
+    for L in root.findall(".//w:Contents/w:Layer", ns):
+        bb = L.find("ows:WGS84BoundingBox", ns)
+        wgs = None
+        if bb is not None:
+            lo = [float(v) for v in bb.findtext("ows:LowerCorner", namespaces=ns).split()]
+            hi = [float(v) for v in bb.findtext("ows:UpperCorner", namespaces=ns).split()]
+            wgs = lo + hi
+        rurl = L.find("w:ResourceURL[@resourceType='tile']", ns)
+        layers.append({
+            "id": L.findtext("ows:Identifier", namespaces=ns), "title": L.findtext("ows:Title", namespaces=ns),
+            "formats": [f.text for f in L.findall("w:Format", ns)],
+            "style": (L.find("w:Style/ows:Identifier", ns).text if L.find("w:Style/ows:Identifier", ns) is not None else "default"),
+            "sets": {s.findtext("w:TileMatrixSet", namespaces=ns): sets.get(s.findtext("w:TileMatrixSet", namespaces=ns))
+                     for s in L.findall("w:TileMatrixSetLink", ns)},
+            "bbox_wgs84": wgs, "template": rurl.get("template") if rurl is not None else None, "kvp": get_url,
+        })
+    return layers
+
+
+def fetch_wmts(capabilities_url: str, bbox_wgs84: tuple[float, float, float, float], gsd: float, out_path: str,
+               layer: str | None = None, matrix_set: str | None = None, workers: int = 8) -> str:
+    """Download a WMTS mosaic covering bbox at the level closest to `gsd` m/px.
+
+    The GeoTIFF is written in the tile matrix set's own CRS (e.g. ITM EPSG:2039),
+    so detections are exported in that CRS without resampling."""
+    from rasterio.warp import transform_bounds
+    layers = wmts_layers(capabilities_url)
+    L = next((l for l in layers if l["id"] == layer), None) if layer else layers[0]
+    if L is None:
+        raise ValueError(f"layer {layer!r} not in service; available: {[l['id'] for l in layers]}")
+    sid = matrix_set or next(iter(L["sets"]))
+    S = L["sets"][sid]
+    crs = S["crs"]
+    # finest level that is not finer than needed (avoid downloading 4x the pixels)
+    mats = sorted(S["matrices"], key=lambda m: m["res"])
+    M = next((m for m in mats if m["res"] >= gsd * 0.75), mats[-1])
+    minx, miny, maxx, maxy = transform_bounds("EPSG:4326", crs, *bbox_wgs84, densify_pts=21)
+    x0, y0 = M["tl"][0], M["tl"][1]
+    if crs in ("EPSG:4326",) or (abs(x0) <= 90 and abs(y0) > 90):   # lat/lon axis order
+        x0, y0 = y0, x0
+    tw, th, res = M["tw"], M["th"], M["res"]
+    c0 = int((minx - x0) // (tw * res)); c1 = int((maxx - x0) // (tw * res))
+    r0 = int((y0 - maxy) // (th * res)); r1 = int((y0 - miny) // (th * res))
+    W, H = (c1 - c0 + 1) * tw, (r1 - r0 + 1) * th
+    if W * H > MAX_PIXELS:
+        raise ValueError(f"Area too large at {res:.3f} m/px ({W}x{H} px). Use a smaller area or coarser resolution.")
+    fmt = "image/jpeg" if "image/jpeg" in L["formats"] else L["formats"][0]
+    base = L["kvp"] or capabilities_url.split("?")[0] + "?"
+    sep = "" if base.endswith(("?", "&")) else ("&" if "?" in base else "?")
+
+    def url(r, c):
+        if L["template"]:
+            return (L["template"].replace("{TileMatrixSet}", sid).replace("{TileMatrix}", M["id"])
+                    .replace("{TileRow}", str(r)).replace("{TileCol}", str(c)).replace("{Style}", L["style"]))
+        return (f"{base}{sep}SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER={L['id']}&STYLE={L['style']}"
+                f"&TILEMATRIXSET={sid}&TILEMATRIX={M['id']}&TILEROW={r}&TILECOL={c}&FORMAT={fmt}")
+
+    mosaic = np.zeros((H, W, 3), np.uint8)
+
+    def load(rc):
+        r, c = rc
+        try:
+            img = Image.open(io.BytesIO(_get(url(r, c)))).convert("RGB")
+            return r, c, np.asarray(img)
+        except Exception:
+            return r, c, None
+
+    jobs = [(r, c) for r in range(r0, r1 + 1) for c in range(c0, c1 + 1)]
+    with ThreadPoolExecutor(workers) as ex:
+        for r, c, arr in ex.map(load, jobs):
+            if arr is not None:
+                rr, cc = (r - r0) * th, (c - c0) * tw
+                mosaic[rr:rr + th, cc:cc + tw] = arr[:th, :tw]
+    left = x0 + c0 * tw * res; top = y0 - r0 * th * res
+    transform = from_bounds(left, top - H * res, left + W * res, top, W, H)
+    _write(out_path, mosaic, transform, crs)
+    return out_path
+
+
 def zoom_for_gsd(gsd_m: float, lat: float) -> int:
     """Pick the XYZ zoom whose resolution is closest to the requested meters/pixel."""
     z0 = 156543.03392 * math.cos(math.radians(lat))

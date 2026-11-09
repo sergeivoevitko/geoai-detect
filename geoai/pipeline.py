@@ -24,8 +24,13 @@ class DetectOptions:
     tta: bool = True                 # test-time augmentation (flips) for land-cover model
     refine_buildings: bool = True    # SAM 2 edge refinement of land-cover buildings
     road_graph: bool = True          # SAM-Road network: centerlines + connected road polygons
-    road_min_half_width: float = 2.5 # m, guaranteed corridor around each centerline
-    road_max_half_width: float = 8.0   # m, paved pixels farther than this are not road
+    road_min_half_width: float = 2.5   # m, guaranteed corridor around each centerline
+    road_max_half_width: float = 6.0   # m, "pavement" pixels (sidewalk/parking-like) allowed this far
+    road_wide_half_width: float = 22.0 # m, "road" pixels allowed this far (multi-lane highways)
+    junction_radius: float = 15.0      # m, intersections: fill paved pixels within this radius
+    bridge_max_gap: float = 70.0       # m, join road ends across paved gaps up to this length
+    road_grow_max: float = 60.0        # m, grow road surface through connected road pixels
+    review_threshold: float = 0.6      # segments with lower agreement are flagged for review
     threshold: float = 0.3
     tile_size: int = 1024
     overlap: int = 192
@@ -88,10 +93,10 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
         mask = cls_map == k
         stuff = is_stuff(label)
         if landcover.landcover_class(label) == "road" and opt.road_graph:
-            lines, mask = _roads_with_samroad(img, cls_map, idx_of, opt,
-                                              lambda p, m: progress(0.82 + 0.1 * p, m))
-            for ln in lines:
-                out.append({"label": f"{label}_centerline", "geometry": ln, "score": 1.0, "source": "auto"})
+            from .roads import extract_roads
+            cl, mask = extract_roads(img, cls_map, idx_of, opt, lambda p, m: progress(0.82 + 0.1 * p, m))
+            for c in cl:
+                out.append({"label": f"{label}_centerline", "source": "auto", **c})
         mask = clean_mask(mask, min_pixels=min_px, close_iter=2 if stuff else 1)
         if not mask.any():
             continue
@@ -112,51 +117,6 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
         for it in postprocess(label, items, gsd, opt.min_area, simplify, opt.regularize):
             out.append({"label": label, "geometry": it["geometry"], "score": it["score"], "source": "auto"})
     return out
-
-
-def _roads_with_samroad(img: GeoImage, cls_map: np.ndarray, idx_of: dict, opt: DetectOptions,
-                        progress: ProgressFn):
-    """Road network from SAM-Road + road surface from the land-cover map.
-
-    Returns (centerlines in source CRS, road surface mask at native resolution).
-    Surface = land-cover road/pavement pixels within `max_half_width` of a SAM-Road
-    centerline, plus a minimum-width corridor so the network has no gaps.
-    """
-    from rasterio.enums import Resampling
-    from rasterio.transform import Affine
-    from . import samroad
-
-    s = img.gsd_meters / samroad.TRAIN_GSD
-    W1, H1 = max(1, int(round(img.ds.width * s))), max(1, int(round(img.ds.height * s)))
-    arr = img.ds.read(list(img.bands), out_shape=(3, H1, W1), resampling=Resampling.average, masked=True)
-    data = np.ma.filled(arr, 0).astype(np.float32)
-    if img._stretch is not None:
-        lo, hi = img._stretch
-        data = (data - lo[:, None, None]) / np.maximum(hi - lo, 1e-6)[:, None, None] * 255
-    rgb = np.clip(data, 0, 255).astype(np.uint8).transpose(1, 2, 0)
-    _, nodes, edges, _ = samroad.infer(rgb, progress=progress)
-    t1 = img.ds.transform * Affine.scale(img.ds.width / W1, img.ds.height / H1)
-    lines = samroad.graph_to_lines(nodes, edges, t1)
-    lines = [ln.simplify(img.gsd * 2) for ln in lines if ln.length > 0]
-
-    H, W = cls_map.shape
-    surface = np.zeros((H, W), bool)
-    if lines:
-        def corridor(meters):
-            return rasterio.features.rasterize(
-                [(ln.buffer(meters, cap_style=2), 1) for ln in lines], out_shape=(H, W),
-                transform=img.ds.transform, dtype=np.uint8).astype(bool)
-        near = corridor(opt.road_max_half_width)
-        core = corridor(opt.road_min_half_width)
-        paved = cls_map == idx_of["road"]
-        if "developed_space" in idx_of:
-            paved |= cls_map == idx_of["developed_space"]
-        surface = (paved & near) | core
-        # keep only paved regions actually connected to a centerline corridor
-        lab, n = ndimage.label(surface)
-        hit = np.unique(lab[core]); hit = hit[hit > 0]
-        surface = np.isin(lab, hit)
-    return lines, surface
 
 
 def _refine_buildings_with_sam(img: GeoImage, lab: np.ndarray, n: int, scores, progress: ProgressFn):

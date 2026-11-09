@@ -23,6 +23,7 @@ def to_geodataframe(features: list[dict], crs) -> gpd.GeoDataFrame:
             "source": f.get("source", "auto")[:20],
             "area_m2": round(float(g.area), 2),
             "perim_m": round(float(g.length), 2),
+            **{k[:10]: v for k, v in (f.get("attrs") or {}).items()},   # shapefile: 10-char field names
             "geometry": g,
         })
     gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=crs)

@@ -60,6 +60,8 @@ map.on("load", () => {
     paint: { "fill-color": colorExpr, "fill-opacity": ["case", ["boolean", ["feature-state", "hover"], false], 0.55, 0.3] } });
   map.addLayer({ id: "f-line", type: "line", source: "features",
     paint: { "line-color": colorExpr, "line-width": ["case", ["==", ["geometry-type"], "LineString"], 3, 1.5] } });
+  map.addLayer({ id: "f-review", type: "line", source: "features", filter: ["==", ["get", "review"], 1],
+    paint: { "line-color": "#ff2d55", "line-width": 5, "line-opacity": 0.85, "line-dasharray": [1, 1] } });
   map.addLayer({ id: "p-fill", type: "fill", source: "preview", paint: { "fill-color": "#00e5ff", "fill-opacity": 0.35 } });
   map.addLayer({ id: "p-line", type: "line", source: "preview", paint: { "line-color": "#00e5ff", "line-width": 2, "line-dasharray": [2, 1] } });
   map.addLayer({ id: "box", type: "line", source: "box", paint: { "line-color": "#00e5ff", "line-width": 2 } });
@@ -111,7 +113,11 @@ $("#upload").onchange = async (e) => {
   } catch (err) { status(err.message, true); }
   e.target.value = "";
 };
-$("#svcType").onchange = (e) => $("#svcType").parentElement.classList.toggle("wms", e.target.value === "wms");
+$("#svcType").onchange = (e) => $("#svcType").parentElement.classList.toggle("wms", e.target.value !== "xyz");
+$("#svcType").parentElement.classList.add("wms");
+// remember the service URL on this computer only (it may contain a personal access key)
+try { $("#svcUrl").value = localStorage.getItem("geoai.svcUrl") || ""; } catch {}
+$("#svcUrl").onchange = (e) => { try { localStorage.setItem("geoai.svcUrl", e.target.value.trim()); } catch {} };
 $("#svcFetch").onclick = async () => {
   const b = map.getBounds();
   const body = { type: $("#svcType").value, url: $("#svcUrl").value.trim(), layer: $("#svcLayer").value.trim(),
@@ -173,6 +179,25 @@ $("#detect").onclick = async () => {
   finally { $("#detect").disabled = false; setTimeout(() => bar.classList.add("hidden"), 1500); }
 };
 
+async function runJob(path, button) {
+  button.disabled = true;
+  const bar = $("#progress"); bar.classList.remove("hidden");
+  try {
+    const job = await api(path, { method: "POST" });
+    while (true) {
+      await new Promise(r => setTimeout(r, 1000));
+      const j = await api(`/api/jobs/${job.job_id}`);
+      bar.firstElementChild.style.width = `${Math.round(j.progress * 100)}%`;
+      bar.lastElementChild.textContent = j.message;
+      if (j.status === "done") { status(j.message); break; }
+      if (j.status === "error") throw new Error(j.message);
+    }
+    await loadFeatures();
+  } catch (err) { status(err.message, true); }
+  finally { button.disabled = false; setTimeout(() => bar.classList.add("hidden"), 1500); }
+}
+$("#verify").onclick = () => state.image ? runJob(`/api/images/${state.image.id}/verify`, $("#verify")) : status("Open an image first", true);
+
 /* ------------------------------------------------------------ features */
 async function loadFeatures() {
   if (!state.image) return;
@@ -191,9 +216,36 @@ function redraw() {
      <span class="dot" style="background:${colorFor(k)}"></span>${k}<span class="n">${n}</span>
      <button data-clear="${k}" title="Remove all ${k}">clear</button></div>`).join("")
     : '<p class="hint">No objects yet.</p>';
+  const rev = state.features.features.filter(f => f.properties.review === 1);
+  if (rev.length) $("#layers").innerHTML += `<div class="layer"><span class="dot" style="background:#ff2d55"></span>
+     needs review<span class="n">${rev.length}</span><button id="acceptReview" title="Mark the current one as correct">✓ ok</button><button id="nextReview">next ›</button></div>`;
   renderClasses();
 }
+let reviewIdx = 0;
+function bboxOf(g) {
+  let w = 180, so = 90, ea = -180, n = -90;
+  const walk = (c) => typeof c[0] === "number" ? (w = Math.min(w, c[0]), ea = Math.max(ea, c[0]), so = Math.min(so, c[1]), n = Math.max(n, c[1])) : c.forEach(walk);
+  walk(g.coordinates); return [w, so, ea, n];
+}
+function nextReview() {
+  const rev = state.features.features.filter(f => f.properties.review === 1);
+  if (!rev.length) return;
+  const f = rev[reviewIdx++ % rev.length];
+  state.reviewing = f.properties.fid;
+  map.fitBounds(bboxOf(f.geometry), { padding: 120, maxZoom: 20 });
+  const p = f.properties;
+  status(`Review ${((reviewIdx - 1) % rev.length) + 1}/${rev.length}: ${p.class}` +
+    (p.width_m !== undefined ? ` · width ${p.width_m} m · agreement ${p.agree}` : "") +
+    (p.ai_verdict ? ` · AI: ${p.ai_verdict} (${p.ai_note || ""})` : "") + ". Delete it (S tool) or keep it.");
+}
 $("#layers").onclick = async (e) => {
+  if (e.target.id === "nextReview") return nextReview();
+  if (e.target.id === "acceptReview") {
+    if (!state.reviewing) return nextReview();
+    await api(`/api/images/${state.image.id}/features/${state.reviewing}/accept`, { method: "POST" });
+    state.reviewing = null; reviewIdx = Math.max(0, reviewIdx - 1);
+    await loadFeatures(); return nextReview();
+  }
   if (e.target.dataset.k !== undefined) {
     const k = e.target.dataset.k; e.target.checked ? state.hidden.delete(k) : state.hidden.add(k); return redraw();
   }

@@ -29,6 +29,47 @@ GeoTIFF / XYZ / WMS ──► tiles ──► AI ──► masks ──► polyg
 segments it in about a second (much faster on a GPU). Shift+click excludes areas.
 Delete wrong detections with one click. Edits are saved and included in the export.
 
+## Roads (designed for 10-30 cm city imagery)
+
+* **Network**: SAM-Road predicts connected centerlines -> `road_centerline.shp`
+* **Width**: measured per segment (75th percentile, so trees/shadows that hide part of the road
+  do not make it narrower). "Road" pixels may extend up to 22 m from a centerline (multi-lane
+  roads), "pavement" pixels only 6 m (keeps parking lots and plazas out).
+* **Junctions / gaps**: the surface grows through connected road and shadow pixels up to 60 m, but a
+  grown area is kept only if it bridges two or more road parts (fills big intersections and shadows
+  lying across a street, rejects building shadows beside a road). Facing road ends are joined
+  across paved, tree-covered or shadowed gaps up to 70 m (`kind = gap_fill`).
+* **Occlusion**: each road is continued at its measured width under tree canopy and cast shadows,
+  "as if the tree were not there". `occluded` = share of the segment that was hidden.
+* **Roundabouts**: small round loops in the network are detected (`kind = roundabout`) and the
+  centre island is cut out as a hole.
+* **Agreement check**: every centerline gets `agree` (0-1) from three independent signals (SAM-Road
+  probability, land-cover under the line, width stability). Segments below 0.6 get `review = 1`;
+  the web app has a *needs review* list that jumps to each one (✓ ok / delete).
+
+## Local AI verification (optional, no internet needed)
+
+`python cli.py image.tif --classes road --verify` or the *AI-verify flagged objects* button.
+A local vision-language model looks at each flagged object and says what lies under it
+(road / roof / grass / trees / parking / water). Matches clear the flag; mismatches stay flagged with
+`ai_verdict = WRONG` and `ai_note`. Default model: Qwen3-VL-2B (Apache-2.0, ~4 GB, ~4-10 s per check on
+CPU). Alternatives: `GEOAI_VLM=Qwen/Qwen3-VL-4B-Instruct` (better, GPU recommended), or Ollama
+(`GEOAI_VLM_BACKEND=ollama GEOAI_VLM=qwen2.5vl:3b`, also `llama3.2-vision`, `gemma3`).
+Small models are a second opinion for gross errors, not a judge of exact edges.
+
+## CPU or GPU
+
+Runs on CPU by default. With an NVIDIA GPU, install the CUDA build of PyTorch (below) and it is used
+automatically, or choose explicitly: `--device cpu|cuda|mps` (CLI) / `GEOAI_DEVICE=cuda` (server).
+
+## Imagery sources
+
+* GeoTIFF upload (any CRS; outputs stay in that CRS)
+* **WMTS** GetCapabilities URL (e.g. a commercial orthophoto service in ITM EPSG:2039 — tiles are
+  mosaicked in the service's own CRS, so Shapefiles come out in ITM)
+* XYZ tiles, WMS
+Service URLs that contain a personal key are stored only in your browser, never in the repo.
+
 ## Install
 
 Requires Python 3.10+. An NVIDIA GPU is strongly recommended (10-50x faster), but CPU works.

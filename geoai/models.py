@@ -24,8 +24,12 @@ SAM3_ID = os.environ.get("GEOAI_SAM3", "facebook/sam3")
 
 
 def pick_device() -> str:
-    if os.environ.get("GEOAI_DEVICE"):
-        return os.environ["GEOAI_DEVICE"]
+    want = os.environ.get("GEOAI_DEVICE", "auto").lower()
+    if want == "cuda" and not torch.cuda.is_available():
+        print("[geoai] CUDA requested but no NVIDIA GPU/driver found; using CPU")
+        return "cpu"
+    if want in ("cpu", "cuda", "mps"):
+        return want
     if torch.cuda.is_available():
         return "cuda"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
