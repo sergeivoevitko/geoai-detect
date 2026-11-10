@@ -114,7 +114,8 @@ Service URLs that contain a personal key are stored only in your browser, never 
 2. Download this repository (green *Code* button → *Download ZIP*, or `git clone`) and unzip it.
 3. Double-click **`install.bat`** (one time, ~10 minutes). With an NVIDIA GPU, see the note inside it.
 4. Double-click **`GeoAI Detect.bat`**. The work area opens in its own window.
-   (`GeoAI Detect (console).bat` does the same but keeps a log window open, useful if something fails.)
+   (`GeoAI Detect (console).bat` keeps a log window open; `GeoAI Detect (browser).bat` opens the work area in
+   your web browser instead of its own window. Engine messages are written to `workspace\\server.log`.)
 
 The AI models (about 6 GB) download automatically the first time a detection runs.
 The window uses Microsoft Edge WebView2, which is built into Windows 10 and 11.
