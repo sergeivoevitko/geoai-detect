@@ -20,5 +20,11 @@ uvicorn[standard]
 python-multipart
 scikit-image
 networkx
+# road network model (SAM-Road)
+addict
+pyyaml
+lightning
+torchmetrics
+matplotlib
 ultralytics  # optional: trained solar panel model (AGPL-3.0 library)
 pywebview>=5

@@ -40,19 +40,22 @@ def wait_ready(url: str, timeout: float = 180):
 
 
 class DesktopApi:
-    """Functions the web page can call through window.pywebview.api (native dialogs)."""
+    """Functions the web page can call through window.pywebview.api (native dialogs).
+
+    Keep non-function attributes private (leading underscore): pywebview walks public attributes
+    recursively, and walking into the window object deadlocks the Windows UI thread."""
 
     def __init__(self):
-        self.window = None
+        self._window = None
 
     def open_file(self):
         import webview
-        r = self.window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False, file_types=RASTER_TYPES)
+        r = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False, file_types=RASTER_TYPES)
         return r[0] if r else None
 
     def choose_folder(self):
         import webview
-        r = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+        r = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         return r[0] if r else None
 
     def open_folder(self, path):
@@ -91,6 +94,7 @@ def main():
     ap.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto")
     a = ap.parse_args()
     os.environ["GEOAI_DEVICE"] = a.device
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")   # Windows without developer mode
     port = a.port or free_port()
     url = f"http://127.0.0.1:{port}"
 
@@ -108,14 +112,14 @@ def main():
         if use_window:
             import webview
             api = DesktopApi()
-            api.window = webview.create_window("GeoAI Detect", html=LOADING_HTML, js_api=api, width=1500,
+            api._window = webview.create_window("GeoAI Detect", html=LOADING_HTML, js_api=api, width=1500,
                                                height=950, min_size=(1000, 650), text_select=True)
 
             def when_ready():
                 if wait_ready(url, timeout=600):
-                    api.window.load_url(url)
+                    api._window.load_url(url)
                 else:
-                    api.window.load_html("<h3 style='font-family:sans-serif'>The AI engine did not start. "
+                    api._window.load_html("<h3 style='font-family:sans-serif'>The AI engine did not start. "
                                          "Send the file workspace\\server.log from the app folder.</h3>")
             webview.start(when_ready)        # window runs on this thread; engine in its own process
         else:

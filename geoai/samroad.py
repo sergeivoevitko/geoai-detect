@@ -35,6 +35,9 @@ TRAIN_GSD = 1.0   # m/px of City-Scale
 def load_samroad():
     if _VENDOR not in sys.path:
         sys.path.insert(0, _VENDOR)
+    # upstream imports wandb only for training-time logging; a stub avoids that dependency
+    import types
+    sys.modules.setdefault("wandb", types.ModuleType("wandb"))
     import yaml
     from addict import Dict
     from huggingface_hub import hf_hub_download
