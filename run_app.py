@@ -12,6 +12,7 @@ import argparse
 import os
 import socket
 import sys
+import subprocess
 import threading
 import time
 import urllib.request
@@ -25,11 +26,6 @@ RASTER_TYPES = ("Raster images (*.tif;*.tiff;*.jp2;*.img;*.vrt;*.png;*.jpg)", "A
 def free_port() -> int:
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close()
     return p
-
-
-def serve(port: int):
-    import uvicorn
-    uvicorn.run("server.app:app", host="127.0.0.1", port=port, log_level="warning")
 
 
 def wait_ready(url: str, timeout: float = 180):
@@ -71,6 +67,23 @@ class DesktopApi:
         return True
 
 
+LOADING_HTML = """<html><body style="font-family:Segoe UI,sans-serif;display:flex;align-items:center;
+justify-content:center;height:100vh;margin:0;background:#eef0f3;color:#1d2330">
+<div style="text-align:center"><h2>GeoAI Detect</h2><p>Starting the AI engine&hellip; (first start can take a minute)</p></div>
+</body></html>"""
+
+
+def start_server(port: int) -> subprocess.Popen:
+    """The AI engine runs in its own process, so the window never freezes while it works."""
+    os.makedirs(os.path.join(ROOT, "workspace"), exist_ok=True)
+    log = open(os.path.join(ROOT, "workspace", "server.log"), "w", encoding="utf-8", errors="replace")
+    flags = 0x08000000 if sys.platform == "win32" else 0          # CREATE_NO_WINDOW
+    return subprocess.Popen([sys.executable, "-m", "uvicorn", "server.app:app", "--host", "127.0.0.1",
+                             "--port", str(port), "--log-level", "warning"],
+                            cwd=ROOT, env=os.environ.copy(), stdout=log, stderr=subprocess.STDOUT,
+                            creationflags=flags)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--browser", action="store_true")
@@ -90,26 +103,39 @@ def main():
             use_window = False
     os.environ["GEOAI_DESKTOP"] = "1" if use_window else "0"
 
-    threading.Thread(target=serve, args=(port,), daemon=True).start()
-    if not wait_ready(url):
-        print("Server did not start; see the console output above.")
-        sys.exit(1)
+    server = start_server(port)
+    try:
+        if use_window:
+            import webview
+            api = DesktopApi()
+            api.window = webview.create_window("GeoAI Detect", html=LOADING_HTML, js_api=api, width=1500,
+                                               height=950, min_size=(1000, 650), text_select=True)
 
-    if use_window:
-        import webview
-        api = DesktopApi()
-        api.window = webview.create_window("GeoAI Detect", url, js_api=api, width=1500, height=950,
-                                           min_size=(1000, 650), text_select=True)
-        webview.start()            # blocks until the window is closed
-    else:
-        import webbrowser
-        webbrowser.open(url)
-        print(f"GeoAI Detect is running at {url}  (Ctrl+C to stop)")
-        try:
-            while True:
-                time.sleep(3600)
-        except KeyboardInterrupt:
-            pass
+            def when_ready():
+                if wait_ready(url, timeout=600):
+                    api.window.load_url(url)
+                else:
+                    api.window.load_html("<h3 style='font-family:sans-serif'>The AI engine did not start. "
+                                         "Send the file workspace\\server.log from the app folder.</h3>")
+            webview.start(when_ready)        # window runs on this thread; engine in its own process
+        else:
+            if not wait_ready(url, timeout=600):
+                print("Server did not start; see workspace/server.log")
+                sys.exit(1)
+            import webbrowser
+            webbrowser.open(url)
+            print(f"GeoAI Detect is running at {url}  (Ctrl+C to stop)")
+            while server.poll() is None:
+                time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(10)
+            except Exception:
+                server.kill()
 
 
 if __name__ == "__main__":
