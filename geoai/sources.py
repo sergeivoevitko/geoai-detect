@@ -27,6 +27,37 @@ def _get(url: str, timeout: int = 30) -> bytes:
     return r.content
 
 
+class NoImageryError(ValueError):
+    """The service answered, but sent no usable imagery for the area."""
+
+
+def _decode_tile(data: bytes):
+    """Decode a tile. Returns (rgb array, is_empty). Empty = fully transparent or one flat colour,
+    which is what most servers send outside coverage or when access is restricted."""
+    img = Image.open(io.BytesIO(data))
+    if img.mode in ("RGBA", "LA", "P"):
+        rgba = np.asarray(img.convert("RGBA"))
+        if rgba[..., 3].max() == 0:
+            return np.zeros(rgba.shape[:2] + (3,), np.uint8), True
+    rgb = np.asarray(img.convert("RGB"))
+    flat = rgb[::8, ::8].reshape(-1, 3)
+    return rgb, bool((flat.max(0) - flat.min(0)).max() <= 2)
+
+
+def _check_imagery(total: int, failed: int, empty: int):
+    bad = failed + empty
+    if total and bad / total > 0.5:
+        if failed > empty:
+            msg = (f"The imagery service did not answer for {failed} of {total} tiles. "
+                   "Check the internet connection and the service URL.")
+        else:
+            msg = (f"The imagery service returned empty tiles for {empty} of {total} tiles of this area. "
+                   "Either the area is outside the service's coverage, or access to the service is "
+                   "restricted (for example an expired key or subscription). Try opening the same "
+                   "service in QGIS or ArcGIS Pro to check.")
+        raise NoImageryError(msg)
+
+
 def fetch_xyz(url_template: str, bbox_wgs84: tuple[float, float, float, float], zoom: int,
               out_path: str, tile_size: int = 256, workers: int = 8) -> str:
     """Download XYZ tiles covering bbox (west, south, east, north) at a zoom level.
@@ -48,18 +79,21 @@ def fetch_xyz(url_template: str, bbox_wgs84: tuple[float, float, float, float], 
         url = (url_template.replace("{z}", str(t.z)).replace("{x}", str(t.x))
                .replace("{-y}", str((1 << t.z) - 1 - t.y)).replace("{y}", str(t.y)))
         try:
-            img = Image.open(io.BytesIO(_get(url))).convert("RGB")
-            if img.size != (tile_size, tile_size):
-                img = img.resize((tile_size, tile_size), Image.BILINEAR)
-            return t, np.asarray(img)
+            arr, empty = _decode_tile(_get(url))
+            if arr.shape[:2] != (tile_size, tile_size):
+                arr = np.asarray(Image.fromarray(arr).resize((tile_size, tile_size), Image.BILINEAR))
+            return t, arr, empty
         except Exception:
-            return t, None
+            return t, None, False
 
+    failed = empty_n = 0
     with ThreadPoolExecutor(workers) as ex:
-        for t, arr in ex.map(load, tiles):
+        for t, arr, empty in ex.map(load, tiles):
+            failed += arr is None; empty_n += empty
             if arr is not None:
                 r, c = (t.y - y0) * tile_size, (t.x - x0) * tile_size
                 mosaic[r:r + tile_size, c:c + tile_size] = arr
+    _check_imagery(len(tiles), failed, empty_n)
 
     ul = mercantile.xy_bounds(x0, y0, zoom)
     lr = mercantile.xy_bounds(x1, y1, zoom)
@@ -95,12 +129,19 @@ def fetch_wms(base_url: str, layer: str, bbox: tuple[float, float, float, float]
 
     def load(j):
         r, c, h, w, url = j
-        img = Image.open(io.BytesIO(_get(url, 120))).convert("RGB")
-        return r, c, h, w, np.asarray(img)
+        try:
+            arr, empty = _decode_tile(_get(url, 120))
+            return r, c, h, w, arr, empty
+        except Exception:
+            return r, c, h, w, None, False
 
+    failed = empty_n = 0
     with ThreadPoolExecutor(4) as ex:
-        for r, c, h, w, arr in ex.map(load, jobs):
-            mosaic[r:r + h, c:c + w] = arr[:h, :w]
+        for r, c, h, w, arr, empty in ex.map(load, jobs):
+            failed += arr is None; empty_n += empty
+            if arr is not None:
+                mosaic[r:r + h, c:c + w] = arr[:h, :w]
+    _check_imagery(len(jobs), failed, empty_n)
 
     transform = from_bounds(minx, maxy - H * gsd, minx + W * gsd, maxy, W, H)
     _write(out_path, mosaic, transform, crs)
@@ -196,17 +237,20 @@ def fetch_wmts(capabilities_url: str, bbox_wgs84: tuple[float, float, float, flo
     def load(rc):
         r, c = rc
         try:
-            img = Image.open(io.BytesIO(_get(url(r, c)))).convert("RGB")
-            return r, c, np.asarray(img)
+            arr, empty = _decode_tile(_get(url(r, c)))
+            return r, c, arr, empty
         except Exception:
-            return r, c, None
+            return r, c, None, False
 
     jobs = [(r, c) for r in range(r0, r1 + 1) for c in range(c0, c1 + 1)]
+    failed = empty_n = 0
     with ThreadPoolExecutor(workers) as ex:
-        for r, c, arr in ex.map(load, jobs):
+        for r, c, arr, empty in ex.map(load, jobs):
+            failed += arr is None; empty_n += empty
             if arr is not None:
                 rr, cc = (r - r0) * th, (c - c0) * tw
                 mosaic[rr:rr + th, cc:cc + tw] = arr[:th, :tw]
+    _check_imagery(len(jobs), failed, empty_n)
     left = x0 + c0 * tw * res; top = y0 - r0 * th * res
     transform = from_bounds(left, top - H * res, left + W * res, top, W, H)
     _write(out_path, mosaic, transform, crs)
