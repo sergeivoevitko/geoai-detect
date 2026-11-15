@@ -266,7 +266,6 @@ def _gdal_url(s: dict) -> str:
 
 
 _http = requests.Session()
-_http.headers["User-Agent"] = "geoai-detect/0.2 (personal use)"
 
 
 @app.get("/api/sources/{sid}/tiles/{z}/{x}/{y}.png")

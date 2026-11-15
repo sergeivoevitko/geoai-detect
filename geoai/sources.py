@@ -17,12 +17,11 @@ from PIL import Image
 from pyproj import Transformer
 from rasterio.transform import from_bounds
 
-UA = {"User-Agent": "geoai-detect/0.1 (personal use)"}
 MAX_PIXELS = 400_000_000
 
 
 def _get(url: str, timeout: int = 30) -> bytes:
-    r = requests.get(url, headers=UA, timeout=timeout)
+    r = requests.get(url, timeout=timeout)
     r.raise_for_status()
     return r.content
 
