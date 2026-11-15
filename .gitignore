@@ -11,4 +11,3 @@ sample_data/israel/
 *.jpg
 !docs/*.jpg
 workspace/
-docs/*.pdf
