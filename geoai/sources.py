@@ -208,10 +208,31 @@ def fetch_wmts(capabilities_url: str, bbox_wgs84: tuple[float, float, float, flo
     sid = matrix_set or next(iter(L["sets"]))
     S = L["sets"][sid]
     crs = S["crs"]
-    # finest level that is not finer than needed (avoid downloading 4x the pixels)
+    # finest level that is not finer than needed (avoid downloading 4x the pixels); if the service
+    # lists levels it does not really serve, fall back to the next coarser ones (up to 1 m/px)
     mats = sorted(S["matrices"], key=lambda m: m["res"])
-    M = next((m for m in mats if m["res"] >= gsd * 0.75), mats[-1])
+    first = next((i for i, m in enumerate(mats) if m["res"] >= gsd * 0.75), len(mats) - 1)
+    candidates = [m for m in mats[first:first + 4] if m["res"] <= max(1.0, mats[first]["res"])]
     minx, miny, maxx, maxy = transform_bounds("EPSG:4326", crs, *bbox_wgs84, densify_pts=21)
+    fmt = "image/jpeg" if "image/jpeg" in L["formats"] else L["formats"][0]
+    base = L["kvp"] or capabilities_url.split("?")[0] + "?"
+    sep = "" if base.endswith(("?", "&")) else ("&" if "?" in base else "?")
+    last_err = None
+    for M in candidates:
+        try:
+            mosaic, transform = _wmts_level(L, sid, M, crs, (minx, miny, maxx, maxy), fmt, base, sep, workers)
+        except NoImageryError as e:
+            last_err = e
+            continue
+        if M is not candidates[0]:
+            print(f"[geoai] {M['res']:.2f} m/px used: finer levels of this service returned no imagery")
+        _write(out_path, mosaic, transform, crs)
+        return out_path
+    raise last_err
+
+
+def _wmts_level(L, sid, M, crs, bounds, fmt, base, sep, workers):
+    minx, miny, maxx, maxy = bounds
     x0, y0 = M["tl"][0], M["tl"][1]
     if crs in ("EPSG:4326",) or (abs(x0) <= 90 and abs(y0) > 90):   # lat/lon axis order
         x0, y0 = y0, x0
@@ -221,9 +242,6 @@ def fetch_wmts(capabilities_url: str, bbox_wgs84: tuple[float, float, float, flo
     W, H = (c1 - c0 + 1) * tw, (r1 - r0 + 1) * th
     if W * H > MAX_PIXELS:
         raise ValueError(f"Area too large at {res:.3f} m/px ({W}x{H} px). Use a smaller area or coarser resolution.")
-    fmt = "image/jpeg" if "image/jpeg" in L["formats"] else L["formats"][0]
-    base = L["kvp"] or capabilities_url.split("?")[0] + "?"
-    sep = "" if base.endswith(("?", "&")) else ("&" if "?" in base else "?")
 
     def url(r, c):
         if L["template"]:
@@ -252,9 +270,7 @@ def fetch_wmts(capabilities_url: str, bbox_wgs84: tuple[float, float, float, flo
                 mosaic[rr:rr + th, cc:cc + tw] = arr[:th, :tw]
     _check_imagery(len(jobs), failed, empty_n)
     left = x0 + c0 * tw * res; top = y0 - r0 * th * res
-    transform = from_bounds(left, top - H * res, left + W * res, top, W, H)
-    _write(out_path, mosaic, transform, crs)
-    return out_path
+    return mosaic, from_bounds(left, top - H * res, left + W * res, top, W, H)
 
 
 def zoom_for_gsd(gsd_m: float, lat: float) -> int:
