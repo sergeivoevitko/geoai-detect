@@ -95,6 +95,9 @@ def split_large(img, geoms_scores: list[dict], min_area: float = 350.0, min_part
     return out
 
 
+MAX_CLICKS = 160
+
+
 def split_with_sam(img, items: list[dict], min_area: float = 350.0, spacing_m: float = 5.0,
                    min_roof: float = 25.0, progress=None) -> list[dict]:
     """Dense blocks: replace each large merged footprint by the individual roofs SAM finds in it.
@@ -120,21 +123,25 @@ def split_with_sam(img, items: list[dict], min_area: float = 350.0, spacing_m: f
                                            dtype=np.uint8).astype(bool) & valid
         inner = ndimage.binary_erosion(blob, iterations=max(1, int(1.5 / gsd)))
         step = max(2, int(spacing_m / gsd))
+        # cap the number of clicks per footprint (memory and time): widen the grid for huge blobs
+        step = max(step, int(np.sqrt(inner.sum() / MAX_CLICKS)) + 1)
         rr, cc = np.mgrid[step // 2:blob.shape[0]:step, step // 2:blob.shape[1]:step]
         pts = [(c, r) for r, c in zip(rr.ravel(), cc.ravel()) if inner[r, c]]
         if len(pts) < 2:
             out.append(it); continue
-        masks, scores = models.sam2_points_batch(rgb, ("roofs", id(img), win.col_off, win.row_off,
-                                                       win.width, win.height), pts)
+        key = ("roofs", id(img), win.col_off, win.row_off, win.width, win.height)
         cand = []
-        for m, sc in zip(masks, scores):
-            a = m.sum() * gsd * gsd
-            if sc < 0.5 or a < min_roof or a > g.area * 1.1:
-                continue
-            inside = (m & blob).sum() / max(1, m.sum())
-            if inside < 0.8:
-                continue
-            cand.append((sc * min(1.0, a / 80.0), m & blob))
+        for i in range(0, len(pts), 32):          # filter each batch at once: never hold all masks
+            masks, scores = models.sam2_points_batch(rgb, key, pts[i:i + 32])
+            for m, sc in zip(masks, scores):
+                a = m.sum() * gsd * gsd
+                if sc < 0.5 or a < min_roof or a > g.area * 1.1:
+                    continue
+                inside = (m & blob).sum() / max(1, m.sum())
+                if inside < 0.8:
+                    continue
+                cand.append((sc * min(1.0, a / 80.0), m & blob))
+            del masks
         cand.sort(key=lambda t: -t[0])
         taken = np.zeros(blob.shape, bool)
         parts = []
