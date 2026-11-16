@@ -72,7 +72,7 @@ class DesktopApi:
 
 LOADING_HTML = """<html><body style="font-family:Segoe UI,sans-serif;display:flex;align-items:center;
 justify-content:center;height:100vh;margin:0;background:#eef0f3;color:#1d2330">
-<div style="text-align:center"><h2>GeoAI Detect</h2><p>Starting the AI engine&hellip; (first start can take a minute)</p></div>
+<div style="text-align:center"><h2>GeoAI Detect</h2><p>Starting the engine</p></div>
 </body></html>"""
 
 
