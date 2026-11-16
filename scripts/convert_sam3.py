@@ -23,7 +23,29 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "third_party", "sam3_convert"))
 
 
+def _check(out):
+    """Load the converted model and run it once on a blank image: catches a broken conversion."""
+    import numpy as np
+    import torch
+    from PIL import Image
+    from transformers import Sam3Model, Sam3Processor
+    proc = Sam3Processor.from_pretrained(out)
+    model = Sam3Model.from_pretrained(out).eval()
+    with torch.inference_mode():
+        inp = proc(images=Image.fromarray(np.zeros((256, 256, 3), np.uint8)), text="car", return_tensors="pt")
+        model(**inp)
+
+
 def main():
+    # Windows consoles default to a code page that cannot print the converter's check marks
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    import transformers
+    import torch
+    print(f"python {sys.version.split()[0]}, torch {torch.__version__}, transformers {transformers.__version__}")
     if len(sys.argv) < 2:
         print(__doc__)
         return 1
@@ -51,10 +73,21 @@ def main():
         return det or sd                 # an image-only checkpoint is used as is
 
     conv.load_original_state_dict = detector_only
-    conv.convert_sam3_checkpoint(src, out)
-    if tmp:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        conv.convert_sam3_checkpoint(src, out)
+    finally:
+        if tmp:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+    print("Checking the converted model ...")
+    try:
+        _check(out)
+    except Exception as ex:
+        import traceback
+        traceback.print_exc()
+        print(f"CHECK FAILED: {type(ex).__name__}: {ex}")
+        print(f"(transformers {transformers.__version__}; this was tested with 5.22. Try: pip install -U transformers)")
+        return 2
     print(f"\nSAM 3 is ready in {out}. Restart GeoAI Detect and tick 'Use SAM 3'.")
     return 0
 

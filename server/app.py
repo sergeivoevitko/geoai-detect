@@ -477,7 +477,8 @@ _SAM3_STEPS = [("extracting", 0.05, "Extracting SAM 3 from the package…"),
                ("Loading weights into Sam3Model", 0.5, "Building the model…"),
                ("Saving converted model", 0.65, "Saving the converted model…"),
                ("Creating and saving processor", 0.8, "Saving the text tokenizer…"),
-               ("Verifying", 0.9, "Checking the converted model…")]
+               ("Verifying", 0.85, "Checking the converted model…"),
+               ("Checking the converted model", 0.92, "Test run of the converted model…")]
 
 
 @app.post("/api/sam3/setup")
@@ -500,10 +501,13 @@ def sam3_setup(req: Sam3Setup):
         script = os.path.join(ROOT, "scripts", "convert_sam3.py")
         tail = []
         try:
-            proc = subprocess.Popen([sys.executable, "-u", script, path], cwd=ROOT,
+            env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+            proc = subprocess.Popen([sys.executable, "-u", script, path], cwd=ROOT, env=env,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, encoding="utf-8", errors="replace")
+            log = open(os.path.join(WORK, "sam3_setup.log"), "w", encoding="utf-8")
             for line in proc.stdout:
+                log.write(line)
                 line = line.strip()
                 if line:
                     tail = (tail + [line])[-8:]
@@ -513,11 +517,15 @@ def sam3_setup(req: Sam3Setup):
                 if _jobs[jid]["cancel"]:
                     proc.kill()
             proc.wait()
+            log.close()
             if _jobs[jid]["cancel"]:
                 _jobs[jid].update(status="cancelled", message="Cancelled")
                 return
             if proc.returncode != 0 or not os.path.exists(os.path.join(models._SAM3_LOCAL, "config.json")):
-                raise RuntimeError(" | ".join(tail[-3:]) or f"converter exited with {proc.returncode}")
+                key = [l for l in tail if l.startswith(("CHECK FAILED", "(transformers", "python "))
+                       or "Error" in l][-3:]
+                raise RuntimeError(" | ".join(key or tail[-3:]) or f"converter exited with {proc.returncode}"
+                                   + ". Full log: workspace/sam3_setup.log")
             models.SAM3_ID = models._SAM3_LOCAL           # use it right away, no restart needed
             models.sam3_available.cache_clear()
             models.load_sam3.cache_clear()
