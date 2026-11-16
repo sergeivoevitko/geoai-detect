@@ -10,6 +10,7 @@ import rasterio.features
 from rasterio.windows import Window
 from scipy import ndimage
 from shapely.geometry import Point, shape
+from shapely.ops import unary_union
 
 from . import landcover, models
 from .raster import GeoImage
@@ -21,6 +22,7 @@ class DetectOptions:
     classes: list[str]
     engine: str = "hybrid"           # hybrid | sam3 | gdino_sam2
     sam3_ok: bool = False            # use SAM 3 for open-vocabulary classes in hybrid mode
+    use_sam3: bool = False           # hybrid: SAM 3 for buildings, solar, parking and road gap filling
     tta: bool = True                 # test-time augmentation (flips) for land-cover model
     refine_buildings: bool = True    # SAM 2 edge refinement of land-cover buildings
     road_graph: bool = True          # SAM-Road network: centerlines + connected road polygons
@@ -86,10 +88,39 @@ def detect_image(img: GeoImage, opt: DetectOptions, progress: ProgressFn | None 
     ov_engine = opt.engine if opt.engine != "hybrid" else ("sam3" if opt.sam3_ok else "gdino_sam2")
     share = len(lc_classes) / max(1, len(opt.classes)) if ov_classes else 1.0
 
+    sam3: dict[str, list] = {}
+    if opt.engine == "hybrid" and opt.use_sam3:
+        prompts = []
+        if any(landcover.landcover_class(c) == "building" for c in lc_classes):
+            prompts.append("building")
+        if solar_classes:
+            prompts.append("solar panel")
+        if any(landcover.landcover_class(c) == "road" for c in lc_classes):
+            prompts += ["road", "parking lot"]
+        if prompts:
+            o = DetectOptions(**{**opt.__dict__, "classes": prompts, "engine": "sam3"})
+            sam3 = {k: [] for k in prompts}
+            for f in _detect_open_vocab(img, o, lambda p, m: progress(0.4 * share * p, "SAM 3: " + m)):
+                sam3.setdefault(f["label"], []).append(f)
+        base_p, span = 0.4 * share, 0.5 * share
+    else:
+        base_p, span = 0.0, 0.9 * share
+
     if lc_classes:
         features += _detect_landcover(img, opt, lc_classes,
-                                      lambda p, m: progress(0.9 * share * p, m))
-    if solar_classes:
+                                      lambda p, m: progress(base_p + span * p, m), sam3=sam3)
+    if solar_classes and "solar panel" in sam3:
+        # SAM 3 panels, kept only on roofs
+        roofs = unary_union([f["geometry"] for f in features if landcover.landcover_class(f["label"]) == "building"
+                             or f["label"] == "__roof_raw"]).buffer(1.0)
+        for f in sam3.get("solar panel", []):
+            g = f["geometry"].intersection(roofs)
+            for p in ([g] if g.geom_type == "Polygon" else [q for q in getattr(g, "geoms", []) if q.geom_type == "Polygon"]):
+                if p.area >= 0.3:
+                    features.append({"label": solar_classes[0], "geometry": p, "score": f["score"], "source": "auto"})
+        if drop_buildings:
+            features = [f for f in features if landcover.landcover_class(f["label"]) != "building"]
+    elif solar_classes:
         from .solar import detect_on_roofs, detect_yolo, merge, yolo_available
         roofs = [f["geometry"] for f in features if f["label"] == "__roof_raw"] or \
                 [f["geometry"] for f in features if landcover.landcover_class(f["label"]) == "building"]
@@ -112,7 +143,9 @@ def detect_image(img: GeoImage, opt: DetectOptions, progress: ProgressFn | None 
     return features
 
 
-def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], progress: ProgressFn) -> list[dict]:
+def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], progress: ProgressFn,
+                      sam3: dict | None = None) -> list[dict]:
+    sam3 = sam3 or {}
     cls_map, conf, names = landcover.segment_raster(img, tile=opt.tile_size, tta=opt.tta,
                                                     progress=lambda p, m: progress(0.8 * p, m))
     idx_of = {v: k for k, v in names.items()}
@@ -127,20 +160,30 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
         if landcover.landcover_class(label) == "road" and opt.road_graph:
             from .roads import extract_roads
             t2n = opt.road_model == "tile2net"
-            ropt = DetectOptions(**{**opt.__dict__, "sidewalks": False}) if t2n else opt
-            span = 0.04 if t2n else 0.1
-            cl, mask, side, parking = extract_roads(img, cls_map, idx_of, ropt,
-                                                    lambda p, m: progress(0.82 + span * p, m))
-            cross = np.zeros_like(mask)
             if t2n:
-                # Tile2Net draws the road surface, sidewalks and crosswalks; SAM-Road (above)
-                # still gives the centerlines and the parking lots
-                from . import tile2net
-                tm = tile2net.segment(img, opt.ped_gsd, lambda p, m: progress(0.86 + 0.06 * p, m))
-                cross = tm["crosswalk"] if opt.crosswalks else cross
-                mask = tm["road"] | tm["crosswalk"]
-                side = tm["sidewalk"] if opt.sidewalks else np.zeros_like(mask)
-                parking = parking & ~(mask | side)
+                from . import roadfuse, tile2net
+                ropt = DetectOptions(**{**opt.__dict__, "sidewalks": False})
+                cl, legacy, _, legacy_park = extract_roads(img, cls_map, idx_of, ropt,
+                                                           lambda p, m: progress(0.82 + 0.04 * p, m))
+                tm = tile2net.segment(img, opt.ped_gsd, lambda p, m: progress(0.86 + 0.04 * p, m))
+                bmask = cls_map == idx_of.get("building", 254)
+                feats, st = roadfuse.build(
+                    img, tm, [c["geometry"] for c in cl], legacy, bmask,
+                    sam3_road=[f["geometry"] for f in sam3.get("road", [])] if opt.use_sam3 else None,
+                    sam3_parking=[f["geometry"] for f in sam3.get("parking lot", [])] if opt.use_sam3 else None,
+                    legacy_parking=legacy_park, sidewalks=opt.sidewalks, crosswalks=opt.crosswalks,
+                    progress=lambda p, m: progress(0.9 + 0.08 * p, m))
+                for f in feats:
+                    if f["label"] == "road":
+                        f["label"] = label
+                    elif f["label"] == "road_centerline":
+                        f["label"] = f"{label}_centerline"
+                    out.append(f)
+                continue
+            # previous road model
+            cl, mask, side, parking = extract_roads(img, cls_map, idx_of, opt,
+                                                    lambda p, m: progress(0.82 + 0.1 * p, m))
+            cross = np.zeros_like(mask)
             for c in cl:
                 out.append({"label": f"{label}_centerline", "source": "auto", **c})
             for extra, emask, emin in (("sidewalk", side, 2.0), ("crosswalk", cross, 3.0),
@@ -159,7 +202,14 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
             continue
         lab, n = ndimage.label(mask)
         scores = ndimage.mean(conf, lab, np.arange(1, n + 1)) / 255.0
-        if landcover.landcover_class(label) == "building" and opt.refine_buildings:
+        if landcover.landcover_class(label) == "building" and "building" in sam3:
+            items = _buildings_from_sam3(img, mask, lab, n, scores, sam3["building"])
+            for it in items:
+                out.append({"label": "__roof_raw", "geometry": it["geometry"], "score": it["score"],
+                            "source": "auto"})
+            from .buildings import split_large
+            items = split_large(img, items, min_area=1200.0)
+        elif landcover.landcover_class(label) == "building" and opt.refine_buildings:
             items = _refine_buildings_with_sam(img, lab, n, scores,
                                                lambda p, m: progress(0.85 + 0.15 * p, m))
             # full building area before splitting: used as the search area for solar panels, so
@@ -183,6 +233,31 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
         for it in postprocess(label, items, gsd, opt.min_area, simplify, opt.regularize):
             out.append({"label": label, "geometry": it["geometry"], "score": it["score"], "source": "auto"})
     return out
+
+
+def _buildings_from_sam3(img: GeoImage, mask: np.ndarray, lab: np.ndarray, n: int, scores,
+                         sam3_buildings: list[dict]) -> list[dict]:
+    """SAM 3 footprints, kept only where the land-cover model also sees a building (so SAM 3
+    cannot add buildings that are not there). Land-cover buildings SAM 3 missed are kept too."""
+    tr = img.ds.transform
+    near = ndimage.binary_dilation(mask, iterations=max(1, int(round(1.0 / img.gsd))))
+    inv = ~tr
+    items = []
+    for f in sam3_buildings:
+        g = f["geometry"]
+        if g.is_empty or g.area < 15:
+            continue
+        m = rasterio.features.rasterize([(g, 1)], out_shape=mask.shape, transform=tr).astype(bool)
+        if m.sum() and near[m].mean() >= 0.5:
+            items.append({"geometry": g, "score": f["score"]})
+    covered = unary_union([it["geometry"] for it in items]) if items else None
+    for geom, v in rasterio.features.shapes(lab.astype(np.int32), mask=mask, transform=tr, connectivity=8):
+        g = shape(geom).buffer(0)
+        if g.area < 15:
+            continue
+        if covered is None or g.intersection(covered).area < 0.3 * g.area:
+            items.append({"geometry": g, "score": float(scores[int(v) - 1]) * 0.8})
+    return items
 
 
 def _refine_buildings_with_sam(img: GeoImage, lab: np.ndarray, n: int, scores, progress: ProgressFn):

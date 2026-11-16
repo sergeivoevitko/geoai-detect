@@ -20,7 +20,10 @@ import torch
 from PIL import Image
 
 GDINO_ID = os.environ.get("GEOAI_GDINO", "IDEA-Research/grounding-dino-base")
-SAM3_ID = os.environ.get("GEOAI_SAM3", "facebook/sam3")
+# SAM 3: a local converted model (scripts/convert_sam3.py writes ~/.cache/geoai/sam3) or the
+# gated Hugging Face repo
+_SAM3_LOCAL = os.path.join(os.environ.get("GEOAI_CACHE") or os.path.join(os.path.expanduser("~"), ".cache", "geoai"), "sam3")
+SAM3_ID = os.environ.get("GEOAI_SAM3") or (_SAM3_LOCAL if os.path.exists(os.path.join(_SAM3_LOCAL, "config.json")) else "facebook/sam3")
 
 
 def pick_device() -> str:
@@ -76,8 +79,11 @@ def load_sam3():
     return proc, model
 
 
+@lru_cache(maxsize=1)
 def sam3_available() -> bool:
     """True if SAM 3 weights are cached locally or downloadable with the current token."""
+    if os.path.isdir(SAM3_ID):
+        return os.path.exists(os.path.join(SAM3_ID, "config.json"))
     try:
         from huggingface_hub import hf_hub_download
         hf_hub_download(SAM3_ID, "config.json", **_hf_kwargs())

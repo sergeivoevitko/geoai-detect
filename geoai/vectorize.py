@@ -1,6 +1,8 @@
 """Mask -> georeferenced polygons, cross-tile merging and geometry cleanup."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import rasterio.features
 from rasterio.transform import Affine
@@ -58,13 +60,73 @@ def _explode(g) -> list[Polygon]:
     return []
 
 
+def _main_angle(p: Polygon) -> float:
+    c = list(p.minimum_rotated_rectangle.exterior.coords)
+    a, b = max(((c[i], c[i + 1]) for i in range(4)), key=lambda e: math.dist(*e))
+    return math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+
+
+def _chaikin_poly(p: Polygon, n: int = 2) -> Polygon:
+    pts = np.asarray(p.exterior.coords[:-1])
+    for _ in range(n):
+        q = 0.75 * pts + 0.25 * np.roll(pts, -1, 0); r = 0.25 * pts + 0.75 * np.roll(pts, -1, 0)
+        pts = np.empty((len(q) * 2, 2)); pts[0::2] = q; pts[1::2] = r
+    return Polygon(pts).buffer(0)
+
+
+def _largest(g):
+    if g.geom_type == "MultiPolygon":
+        return max(g.geoms, key=lambda x: x.area)
+    return g
+
+
 def regularize_building(p: Polygon, tol: float) -> Polygon:
-    """Make building footprints look like buildings: straight edges, right angles
-    when the shape is close to a rectangle."""
+    """Make building footprints look like buildings.
+
+    * nearly rectangular -> the rectangle
+    * otherwise walls are squared to the building's own main direction: the outline is redrawn on
+      a 25 cm grid aligned with the building and jogs smaller than ~2 m are removed, so walls are
+      straight and corners are right angles (kept only when it still matches the shape, IoU >= 0.85)
+    * round buildings (towers, domes) keep a smooth curve
+    * anything else: small notches/spikes removed, edges straightened
+    """
+    p = _largest(p.buffer(0))
     mrr = p.minimum_rotated_rectangle
     if mrr.area > 0 and p.area / mrr.area > 0.85:
         return mrr
-    s = p.simplify(tol, preserve_topology=True)
+    x0, y0, x1, y1 = p.bounds
+    if max(x1 - x0, y1 - y0) < 1e-3:                    # geographic coordinates: keep it simple
+        s = p.simplify(tol, preserve_topology=True)
+        return s if s.is_valid and not s.is_empty else p
+    p = Polygon(p.exterior, [h for h in p.interiors if Polygon(h).area >= 25]).buffer(0)
+    p = _largest(p)
+    if 4 * math.pi * p.area / p.length ** 2 > 0.75:     # round
+        return _chaikin_poly(p.simplify(0.5))
+    from rasterio import features
+    from rasterio.transform import from_origin
+    from scipy import ndimage
+    from shapely import affinity
+    from shapely.geometry import shape
+    step, pad = 0.25, 2
+    ang, c = _main_angle(p), p.centroid
+    q = affinity.rotate(p, -ang, origin=c)
+    bx0, by0, bx1, by1 = q.bounds
+    W, H = int((bx1 - bx0) / step) + 2 * pad, int((by1 - by0) / step) + 2 * pad
+    if W * H < 50_000_000:
+        tr = from_origin(bx0 - pad * step, by1 + pad * step, step, step)
+        m = features.rasterize([(q, 1)], out_shape=(H, W), transform=tr).astype(bool)
+        k = 4                                            # 2 m jogs at 25 cm
+        m = ndimage.binary_closing(ndimage.binary_opening(m, iterations=k), iterations=k)
+        shp = [shape(g) for g, _ in features.shapes(m.astype(np.uint8), mask=m, transform=tr)]
+        if shp:
+            r = max(shp, key=lambda g: g.area)
+            r = Polygon(r.exterior, [h for h in r.interiors if Polygon(h).area >= 25]).simplify(0.01)
+            r = affinity.rotate(r, ang, origin=c)
+            if r.is_valid and r.intersection(p).area / max(r.union(p).area, 1e-9) >= 0.85:
+                return r
+    s = p.buffer(1.0, join_style=2).buffer(-1.0, join_style=2).buffer(-0.8, join_style=2).buffer(0.8, join_style=2)
+    s = _largest(s) if not s.is_empty else p
+    s = s.simplify(max(tol, 0.6), preserve_topology=True)
     return s if s.is_valid and not s.is_empty else p
 
 

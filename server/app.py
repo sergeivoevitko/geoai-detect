@@ -128,7 +128,7 @@ def index():
 @app.get("/api/config")
 def config():
     from geoai.solar import yolo_available
-    return {"device": models.DEVICE, "solar_model": yolo_available(),
+    return {"device": models.DEVICE, "solar_model": yolo_available(), "sam3_available": models.sam3_available(),
             "desktop": os.environ.get("GEOAI_DESKTOP") == "1",
             "classes": [
                 {"id": "building", "name": "Buildings", "default": True},
@@ -320,7 +320,7 @@ class DetectReq(BaseModel):
     source: str
     bbox: list[float]                   # rectangle, WGS84 west, south, east, north
     classes: list[str]
-    options: dict = {}                  # centerlines / sidewalks / crosswalks / parking / legacy_roads: bool
+    options: dict = {}                  # centerlines / sidewalks / crosswalks / parking / legacy_roads / use_sam3: bool
     gsd: float = 0.15                   # services: download resolution (m/px)
     custom: list[str] = []              # extra free-text classes (open-vocabulary detector)
 
@@ -416,7 +416,7 @@ def start_detect(req: DetectReq):
     rdir = os.path.join(WORK, "runs", rid); os.makedirs(rdir)
     _jobs[jid] = {"status": "running", "progress": 0.0, "message": "Starting…", "cancel": False, "run": rid}
     opt_flags = {"centerlines": True, "sidewalks": True, "crosswalks": True, "parking": True,
-                 "legacy_roads": False, **(req.options or {})}
+                 "legacy_roads": False, "use_sam3": False, **(req.options or {})}
 
     def run():
         t0 = time.time()
@@ -432,7 +432,8 @@ def start_detect(req: DetectReq):
             img = GeoImage(aoi)
             opt = DetectOptions(classes=classes, engine="hybrid", overlap=170,
                                 sidewalks=opt_flags["sidewalks"], crosswalks=opt_flags["crosswalks"],
-                                road_model="legacy" if opt_flags["legacy_roads"] else "tile2net")
+                                road_model="legacy" if opt_flags["legacy_roads"] else "tile2net",
+                                use_sam3=bool(opt_flags["use_sam3"]) and models.sam3_available())
             prog(0.05, "Loading AI models…")
             feats = detect_image(img, opt, lambda p, m: prog(0.05 + 0.93 * p, m))
             if not opt_flags["centerlines"]:

@@ -270,9 +270,17 @@ function renderClasses() {
       <span class="swatch" style="background:${colorFor(c.id)}"></span> ${c.name}</label>${sub ? `<div class="sub">${sub}</div>` : ""}`;
   }).join("");
 }
+function renderSam3() {
+  const ok = !!state.cfg.sam3_available;
+  const box = $("#useSam3");
+  box.disabled = !ok;
+  box.checked = ok && store.get("geoai.sam3", true);
+  $("#sam3Hint").textContent = ok ? "(slower, more complete)" : "(not installed)";
+  box.onchange = () => store.set("geoai.sam3", box.checked);
+}
 function chosenClasses() {
   const cls = [...document.querySelectorAll("[data-cls]:checked")].map(e => e.dataset.cls);
-  const opts = {};
+  const opts = { use_sam3: $("#useSam3").checked };
   document.querySelectorAll("[data-opt]").forEach(e => { opts[e.dataset.opt] = e.checked && cls.includes(e.dataset.parent); });
   store.set("geoai.classes", [...cls, ...[...document.querySelectorAll("[data-opt]:checked")].map(e => `${e.dataset.parent}:${e.dataset.opt}`)]);
   return { cls, opts };
@@ -455,7 +463,7 @@ async function init() {
     state.desktop = state.cfg.desktop;
     document.querySelectorAll(".desktop-only").forEach(e => e.classList.toggle("hidden", !state.desktop));
     $("#device").textContent = state.cfg.device === "cpu" ? "CPU" : "GPU (" + state.cfg.device + ")";
-    renderClasses();
+    renderClasses(); renderSam3();
     state.sources = await api("/api/sources");
     for (const s of state.sources) addSourceLayer(s);
     const act = store.get("geoai.active", null);
