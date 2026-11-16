@@ -68,7 +68,9 @@ With *Use SAM 3* ticked (`--sam3` on the command line):
 * **Parking** and **road gap filling** as described above.
 
 SAM 3 is slower (about 4 passes per image tile). Setup, once: SAM 3 comes in the `SAM3.dlpk`
-package (or as `sam3.pt` from Meta). Convert it with
+package (or as `sam3.pt` from Meta). In the app, click **set up…** next to *Use SAM 3*, choose the
+file (Browse… in the desktop app, or paste the path) and click **Convert and install**; it takes
+about 5-15 minutes and SAM 3 can be used right after, without a restart. From a terminal instead:
 
 ```
 python scripts/convert_sam3.py C:\path\to\SAM3.dlpk

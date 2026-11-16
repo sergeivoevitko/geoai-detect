@@ -53,6 +53,12 @@ class DesktopApi:
         r = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False, file_types=RASTER_TYPES)
         return r[0] if r else None
 
+    def open_sam3_package(self):
+        import webview
+        r = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=False,
+                                            file_types=("SAM 3 package (*.dlpk;*.pt)", "All files (*.*)"))
+        return r[0] if r else None
+
     def choose_folder(self):
         import webview
         r = self._window.create_file_dialog(webview.FOLDER_DIALOG)

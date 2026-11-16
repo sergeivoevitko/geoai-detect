@@ -466,6 +466,69 @@ def start_detect(req: DetectReq):
     return {"job_id": jid}
 
 
+class Sam3Setup(BaseModel):
+    path: str
+
+
+# progress milestones printed by scripts/convert_sam3.py and the converter it uses
+_SAM3_STEPS = [("extracting", 0.05, "Extracting SAM 3 from the package…"),
+               ("Loading original checkpoint", 0.3, "Reading the SAM 3 checkpoint…"),
+               ("Converting checkpoint keys", 0.4, "Converting…"),
+               ("Loading weights into Sam3Model", 0.5, "Building the model…"),
+               ("Saving converted model", 0.65, "Saving the converted model…"),
+               ("Creating and saving processor", 0.8, "Saving the text tokenizer…"),
+               ("Verifying", 0.9, "Checking the converted model…")]
+
+
+@app.post("/api/sam3/setup")
+def sam3_setup(req: Sam3Setup):
+    """Convert the SAM3 .dlpk (or sam3.pt) into the format the app loads, in the background."""
+    path = req.path.strip().strip('"')
+    if not os.path.isfile(path):
+        raise HTTPException(400, "File not found: " + path)
+    if not path.lower().endswith((".dlpk", ".pt")):
+        raise HTTPException(400, "Choose the SAM3 .dlpk package or a sam3.pt file")
+    if any(j.get("kind") == "sam3" and j["status"] == "running" for j in _jobs.values()):
+        raise HTTPException(409, "SAM 3 setup is already running")
+    jid = "sam3-" + uuid.uuid4().hex[:6]
+    _jobs[jid] = {"status": "running", "progress": 0.0, "message": "Starting SAM 3 setup…",
+                  "cancel": False, "kind": "sam3"}
+
+    def run():
+        import subprocess
+        import sys
+        script = os.path.join(ROOT, "scripts", "convert_sam3.py")
+        tail = []
+        try:
+            proc = subprocess.Popen([sys.executable, "-u", script, path], cwd=ROOT,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding="utf-8", errors="replace")
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    tail = (tail + [line])[-8:]
+                for key, p, msg in _SAM3_STEPS:
+                    if key in line and p > _jobs[jid]["progress"]:
+                        _jobs[jid].update(progress=p, message=msg)
+                if _jobs[jid]["cancel"]:
+                    proc.kill()
+            proc.wait()
+            if _jobs[jid]["cancel"]:
+                _jobs[jid].update(status="cancelled", message="Cancelled")
+                return
+            if proc.returncode != 0 or not os.path.exists(os.path.join(models._SAM3_LOCAL, "config.json")):
+                raise RuntimeError(" | ".join(tail[-3:]) or f"converter exited with {proc.returncode}")
+            models.SAM3_ID = models._SAM3_LOCAL           # use it right away, no restart needed
+            models.sam3_available.cache_clear()
+            models.load_sam3.cache_clear()
+            _jobs[jid].update(status="done", progress=1.0, message="SAM 3 is ready")
+        except Exception as ex:
+            _jobs[jid].update(status="error", message=f"SAM 3 setup failed: {ex}")
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"job_id": jid}
+
+
 @app.get("/api/jobs/{jid}")
 def job(jid: str):
     if jid not in _jobs:

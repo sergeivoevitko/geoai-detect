@@ -57,7 +57,18 @@
       <h2>Detect</h2>
       <div id="classList" class="checks"></div>
       <label class="checks" id="sam3Row" title="SAM 3 finds buildings, solar panels and parking lots and fills gaps in roads. Slower.">
-        <input type="checkbox" id="useSam3"> Use SAM 3 <span class="hint" id="sam3Hint"></span></label>
+        <input type="checkbox" id="useSam3"> Use SAM 3 <span class="hint" id="sam3Hint"></span>
+        <a href="#" id="sam3SetupLink" class="hint">set up…</a></label>
+      <div id="sam3Setup" class="hidden">
+        <p class="hint">Choose the SAM3 .dlpk package (or a sam3.pt file). It is converted once, about
+          5 to 15 minutes, and needs ~8 GB free memory and 4 GB disk. Nothing from the package is run.</p>
+        <div class="row">
+          <input id="sam3Path" class="grow" placeholder="C:\models\SAM3.dlpk">
+          <button id="sam3Browse" class="desktop-only">Browse…</button>
+        </div>
+        <div class="row"><button id="sam3Convert" class="primary grow">Convert and install</button></div>
+        <div id="sam3Progress" class="progress hidden"><div></div><span></span></div>
+      </div>
       <details>
         <summary>Other object (free text)</summary>
         <input id="customClass" placeholder="e.g. swimming pool, car">

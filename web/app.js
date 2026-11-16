@@ -277,7 +277,37 @@ function renderSam3() {
   box.checked = ok && store.get("geoai.sam3", true);
   $("#sam3Hint").textContent = ok ? "(slower, more complete)" : "(not installed)";
   box.onchange = () => store.set("geoai.sam3", box.checked);
+  $("#sam3SetupLink").textContent = ok ? "reinstall…" : "set up…";
+  $("#sam3SetupLink").onclick = (e) => { e.preventDefault(); $("#sam3Setup").classList.toggle("hidden"); };
 }
+$("#sam3Browse").onclick = async () => {
+  const p = await window.pywebview?.api.open_sam3_package();
+  if (p) $("#sam3Path").value = p;
+};
+$("#sam3Convert").onclick = async () => {
+  const path = $("#sam3Path").value.trim();
+  if (!path) return status("Choose the SAM3 .dlpk file first", true);
+  const btn = $("#sam3Convert"), bar = $("#sam3Progress");
+  btn.disabled = true; bar.classList.remove("hidden"); bar.firstElementChild.style.width = "0";
+  try {
+    const job = await jpost("/api/sam3/setup", { path });
+    while (true) {
+      await new Promise(r => setTimeout(r, 1500));
+      const j = await api(`/api/jobs/${job.job_id}`);
+      bar.firstElementChild.style.width = `${Math.round(j.progress * 100)}%`;
+      bar.lastElementChild.textContent = j.message;
+      if (j.status === "done") {
+        state.cfg = await api("/api/config");
+        renderSam3(); $("#useSam3").checked = true; store.set("geoai.sam3", true);
+        $("#sam3Setup").classList.add("hidden");
+        status("SAM 3 is installed and switched on");
+        break;
+      }
+      if (j.status !== "running") { status(j.message, true); break; }
+    }
+  } catch (err) { status(err.message, true); }
+  finally { btn.disabled = false; }
+};
 function chosenClasses() {
   const cls = [...document.querySelectorAll("[data-cls]:checked")].map(e => e.dataset.cls);
   const opts = { use_sam3: $("#useSam3").checked };
