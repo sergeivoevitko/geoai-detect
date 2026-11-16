@@ -59,7 +59,8 @@ def load_samroad():
         net = SAMRoad(cfg)
     # weights_only=True: refuse to unpickle anything but tensors/plain containers, so a
     # tampered checkpoint cannot execute code on load.
-    ck = torch.load(hf_hub_download(REPO_ID, CKPT), map_location="cpu", weights_only=True)
+    local = os.environ.get("GEOAI_SAMROAD_CKPT")          # optional: a local SAM-Road checkpoint
+    ck = torch.load(local or hf_hub_download(REPO_ID, CKPT), map_location="cpu", weights_only=True)
     net.load_state_dict(ck["state_dict"], strict=True)
     return net.to(DEVICE).eval(), cfg
 
