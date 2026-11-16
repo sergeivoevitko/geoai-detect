@@ -565,6 +565,146 @@ def islands(road, side_detected, grid: Grid, green):
     return unary_union(paved) if paved else EMPTY, unary_union(other) if other else EMPTY
 
 
+def crosswalk_shape(p, road):
+    """Detected crosswalks have zigzag edges (the stripes). A crosswalk is a rectangle, so it is
+    replaced by its best-fitting rotated rectangle; bent ones (across a curve or a corner) are
+    split along their length and each part gets its own rectangle. Clipped to the road."""
+    p = p.buffer(0.6, join_style=2).buffer(-0.6, join_style=2)       # close the gaps between stripes
+    if p.is_empty or p.area < 3:
+        return []
+    r = p.minimum_rotated_rectangle
+    if p.area / max(r.area, 1e-9) >= 0.55:
+        parts = [r]
+    else:
+        c = list(r.exterior.coords)
+        e = [(c[i], c[i + 1]) for i in range(4)]
+        long_ = max(e, key=lambda s: math.dist(*s))
+        L = math.dist(*long_)
+        n = max(2, min(4, int(round(L / 6))))
+        ux, uy = (long_[1][0] - long_[0][0]) / L, (long_[1][1] - long_[0][1]) / L
+        parts = []
+        for k in range(n):
+            a0, a1 = L * k / n, L * (k + 1) / n
+            ox, oy = long_[0]
+            cut = Polygon([(ox + ux * a0 - uy * 1e3, oy + uy * a0 + ux * 1e3), (ox + ux * a1 - uy * 1e3, oy + uy * a1 + ux * 1e3),
+                           (ox + ux * a1 + uy * 1e3, oy + uy * a1 - ux * 1e3), (ox + ux * a0 + uy * 1e3, oy + uy * a0 - ux * 1e3)])
+            q = p.intersection(cut)
+            if q.area >= 1:
+                parts.append(q.minimum_rotated_rectangle)
+    out = []
+    for q in sorted(parts, key=lambda x: -x.area):
+        if road is not None and not road.is_empty and q.intersection(road.buffer(0.5)).area < 0.5 * q.area:
+            continue
+        if out:
+            q = q.difference(unary_union(out))
+        out += [x for x in polys(q) if x.area >= 3]
+    return out
+
+
+def crosswalks_from_stripes(img, blob, road):
+    """Rebuild a detected crosswalk area from its painted stripes.
+
+    White stripes inside the blob are found in the image; stripes with the same direction that lie
+    next to each other form one crosswalk, drawn as a rectangle aligned with the stripes. This
+    splits blobs that merged two crosswalks and drops paint/asphalt the model spilled onto.
+    Returns [] if no stripes are found (e.g. coarse imagery); the caller then falls back."""
+    from rasterio.windows import from_bounds
+    from shapely import affinity
+    gsd = img.gsd
+    if gsd > 0.25:                                     # stripes ~0.5 m wide: need sharp imagery
+        return []
+    x0, y0, x1, y1 = blob.buffer(1.5).bounds
+    win = from_bounds(x0, y0, x1, y1, img.ds.transform).round_offsets().round_lengths()
+    if win.width < 8 or win.height < 8:
+        return []
+    rgb, valid = img.read_rgb(win)
+    g = rgb.astype(np.float32).mean(2)
+    tr = img.ds.window_transform(win)
+    inside = features.rasterize([(blob.buffer(0.5), 1)], out_shape=g.shape, transform=tr).astype(bool) & valid
+    if inside.sum() < 30:
+        return []
+    # local contrast: a stripe is brighter than the asphalt ~1.5 m around it, also in shadow
+    k = max(5, int(round(3.0 / gsd)) | 1)
+    bg = ndimage.median_filter(g, size=k)
+    d = g - bg
+    spread = np.percentile(d[inside], 95) - np.percentile(d[inside], 50)
+    if spread < 8:
+        return []
+    white = inside & (d > max(6.0, 0.35 * spread))
+    white = ndimage.binary_opening(white, iterations=1)
+    stripes = []
+    for s_, _ in features.shapes(white.astype(np.uint8), mask=white, transform=tr):
+        q = shape(s_)
+        if not (0.25 <= q.area <= 6.0):
+            continue
+        r = q.minimum_rotated_rectangle
+        c = list(r.exterior.coords)
+        e = sorted((math.dist(c[i], c[i + 1]), c[i], c[i + 1]) for i in range(4))
+        short, long_ = e[0][0], e[-1][0]
+        if short < 0.15 or long_ / short < 2.2 or not (1.2 <= long_ <= 6.0):
+            continue
+        a = math.atan2(e[-1][2][1] - e[-1][1][1], e[-1][2][0] - e[-1][1][0]) % math.pi
+        stripes.append((q, a))
+    if len(stripes) < 3:
+        return []
+    # group: similar direction and close together
+    n = len(stripes)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]; i = parent[i]
+        return i
+    for i in range(n):
+        for j in range(i + 1, n):
+            da = abs(stripes[i][1] - stripes[j][1]); da = min(da, math.pi - da)
+            if da < math.radians(15) and stripes[i][0].distance(stripes[j][0]) < 2.5:
+                parent[find(i)] = find(j)
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    o = blob.centroid
+    body = blob.buffer(0.6, join_style=2).buffer(-0.6, join_style=2)
+    rects = []                                           # (angle, rotated-frame box)
+    for idx in groups.values():
+        if len(idx) < 4:                                  # a zebra crossing has many stripes
+            continue
+        angs = np.array([stripes[i][1] for i in idx])
+        a = math.atan2(np.sin(2 * angs).mean(), np.cos(2 * angs).mean()) / 2   # mean axial angle
+        u = affinity.rotate(unary_union([stripes[i][0] for i in idx]), -a, origin=o, use_radians=True)
+        rb = affinity.rotate(body, -a, origin=o, use_radians=True)
+        ux0, uy0, ux1, uy1 = u.bounds                  # stripes lie along x in this frame
+        band = Polygon([(ux0 - 0.3, uy0 - 50), (ux1 + 0.3, uy0 - 50), (ux1 + 0.3, uy1 + 50), (ux0 - 0.3, uy1 + 50)])
+        # the crossing length comes from the model's area along this band (stripes can be worn)
+        part = [q for q in polys(rb.intersection(band)) if q.intersects(u.buffer(0.5))]
+        ext = unary_union(part + [u])
+        _, y0, _, y1 = ext.bounds
+        rects.append((a, (ux0 - 0.2, y0, ux1 + 0.2, y1)))
+    # merge boxes of the same crosswalk (same direction, overlapping)
+    out_boxes = []
+    for a, b in rects:
+        for k, (a2, b2) in enumerate(out_boxes):
+            da = abs(a - a2); da = min(da, math.pi - da)
+            if da < math.radians(15) and not (b[2] < b2[0] or b2[2] < b[0] or b[3] < b2[1] - 1.0 or b2[3] < b[1] - 1.0):
+                out_boxes[k] = (a2, (min(b[0], b2[0]), min(b[1], b2[1]), max(b[2], b2[2]), max(b[3], b2[3])))
+                break
+        else:
+            out_boxes.append((a, b))
+    rects_ = [affinity.rotate(Polygon([(x0_, y0_), (x1_, y0_), (x1_, y1_), (x0_, y1_)]), a, origin=o, use_radians=True)
+              for a, (x0_, y0_, x1_, y1_) in out_boxes]
+    rects_.sort(key=lambda r: -r.area)
+    out = []
+    for r in rects_:
+        if r.area < 3:
+            continue
+        if road is not None and not road.is_empty and r.intersection(road.buffer(0.5)).area < 0.5 * r.area:
+            continue                                      # mostly off the road
+        if any(r.intersection(k).area > 0.25 * r.area for k in out):
+            continue                                      # part of a bigger crosswalk
+        out.append(r.difference(unary_union(out)) if out else r)
+    return [p for r in out for p in polys(r) if p.area >= 3]
+
+
 # ------------------------------------------------------------------ main
 def build(img, t2n: dict, samroad_lines: list, legacy_road: np.ndarray, building: np.ndarray,
           sam3_road=None, sam3_parking=None, legacy_parking: np.ndarray | None = None,
@@ -609,6 +749,10 @@ def build(img, t2n: dict, samroad_lines: list, legacy_road: np.ndarray, building
     parking = park_ref.difference(unary_union([road, side]).buffer(0.5)) if not park_ref.is_empty else EMPTY
     parking = smooth_area(parking.buffer(-1.5).buffer(1.5), min_area=60.0)
     cross = t_cross.intersection(road.buffer(0.5)) if crosswalks else EMPTY
+    cw = []
+    for p in polys(cross):
+        cw += crosswalks_from_stripes(img, p, road) or crosswalk_shape(p, road)
+    cross = unary_union(cw) if cw else EMPTY
 
     feats = []
     for p in polys(road):
