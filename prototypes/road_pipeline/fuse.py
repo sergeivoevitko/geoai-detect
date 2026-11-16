@@ -25,7 +25,14 @@ def contacts(p):
     return len([g for g in getattr(c, "geoms", [c]) if g.area > 2])
 # gap filling only: a SAM 3 piece must connect road on two separate sides (a gap between road
 # pieces, e.g. a bridge shadow), not just sit next to the road (plazas, yards)
-keep = [p for p in pieces if contacts(p) >= 2]
+def along_centerline(p):
+    """a SAM-Road centerline runs through the piece lengthwise (a road, not a railway or a yard)"""
+    ln = p.intersection(cl_old)
+    L = max(p.minimum_rotated_rectangle.exterior.length / 2 - min(
+        LineString(p.minimum_rotated_rectangle.exterior.coords[i:i + 2]).length for i in range(2)), 1.0)
+    return ln.length >= min(8.0, 0.5 * L) if not ln.is_empty else False
+from shapely.geometry import LineString
+keep = [p for p in pieces if contacts(p) >= 2 and along_centerline(p)]
 added = unary_union(keep)
 fused = unary_union([base, added]).buffer(0.5).buffer(-0.5)
 # ---- centerline fill: SAM-Road segments that run outside the visible road (residential streets the
