@@ -29,7 +29,55 @@ GeoTIFF / XYZ / WMS ──► tiles ──► AI ──► masks ──► polyg
 segments it in about a second (much faster on a GPU). Shift+click excludes areas.
 Delete wrong detections with one click. Edits are saved and included in the export.
 
-## Roads (designed for 10-30 cm city imagery)
+## Roads, sidewalks, crosswalks, parking (default)
+
+Several models are combined; a piece is only added when two of them agree.
+
+1. **Tile2Net** (open source, BSD-3) draws road, sidewalk and crosswalk pixels. It runs at 15 cm
+   when the imagery is that sharp, otherwise at 30 cm. Weights (578 MB) download once and are
+   checked against their published SHA-256.
+2. **Gap filling**: SAM 3 "road" pieces (when *Use SAM 3* is on) fill a gap only if they connect
+   road on two sides *and* a SAM-Road centerline runs through them (bridge shadows, big junctions).
+   SAM-Road centerline segments outside the visible road become road when they connect to the
+   network and are not in a parking lot, on a building or on a plaza (streets missed at 30 cm,
+   road under tree canopy).
+3. **Network**: centerlines are traced from the final road: short stubs pruned, gaps up to 25 m
+   closed, one node per junction, bridges over highways left unconnected, straight lines on
+   straight streets, true circles on roundabouts.
+4. **Curb line**: road and sidewalk share one edge, no overlap. Sidewalk gaps (trees, parked cars)
+   are filled on street sides that already have at least 40 % detected sidewalk, never in medians.
+5. **Islands**: planted or unpaved islands and roundabout centres are left out of the road; paved
+   islands and plazas are sidewalk.
+6. **Parking**: SAM 3 "parking lot" (or the previous method without SAM 3) minus road and sidewalk.
+7. Outlines are smoothed: straight edges, rounded corners.
+
+`road_centerline` fields: `width_m`, `lanes`, `road_class` (highway / main / local), `shape`
+(straight / curve / roundabout), `source` (`detected`, `inferred` = added to complete the network,
+`occluded` = under trees), `review` (1 for anything not seen directly). `sidewalk` pieces added by
+step 4 have `source = inferred`.
+
+Tick *Use previous road model* (or `--road-model legacy`) for the method below.
+
+## SAM 3 (optional: buildings, solar panels, parking, road gaps)
+
+With *Use SAM 3* ticked (`--sam3` on the command line):
+
+* **Buildings**: SAM 3 footprints, kept only where the land-cover model also sees a building;
+  buildings SAM 3 missed are kept from land cover.
+* **Solar panels**: SAM 3, kept only on roofs.
+* **Parking** and **road gap filling** as described above.
+
+SAM 3 is slower (about 4 passes per image tile). Setup, once: SAM 3 comes in the `SAM3.dlpk`
+package (or as `sam3.pt` from Meta). Convert it with
+
+```
+python scripts/convert_sam3.py C:\path\to\SAM3.dlpk
+```
+
+It writes `%USERPROFILE%\.cache\geoai\sam3`, which the app finds automatically. Nothing from the
+package is executed; the checkpoint is read as tensors only. SAM 3 is under Meta's SAM License.
+
+## Previous road model (designed for 10-30 cm city imagery)
 
 * **Network**: SAM-Road predicts connected centerlines -> `road_centerline.shp`
 * **Width**: measured per segment (75th percentile, so trees/shadows that hide part of the road
@@ -170,4 +218,8 @@ On Linux/macOS: `python -m venv .venv && .venv/bin/pip install -r requirements.t
 | `GEOAI_SAM2`      | `facebook/sam2.1-hiera-large` on GPU, `-small` on CPU     |
 | `GEOAI_GDINO`     | `IDEA-Research/grounding-dino-base`                       |
 | `GEOAI_LANDCOVER` | `kishan4444/upernet-swin-openearthmap-road-segmentation`  |
-| `HF_TOKEN`        | Hugging Face token (needed for SAM 3 only)                |
+| `HF_TOKEN`        | Hugging Face token (only for downloading SAM 3 from Hugging Face) |
+| `GEOAI_SAM3`      | folder of a converted SAM 3 model (default `~/.cache/geoai/sam3`) |
+| `GEOAI_TILE2NET_CKPT` | local `satellite_2021.pth` instead of downloading it      |
+| `GEOAI_SAMROAD_CKPT`  | local SAM-Road checkpoint (e.g. Esri's retrained weights) |
+| `GEOAI_CACHE`     | cache folder for downloaded/converted models (`~/.cache/geoai`) |
