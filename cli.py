@@ -42,6 +42,8 @@ def main():
     ap.add_argument("--xyz", help="XYZ tile URL template instead of a file")
     ap.add_argument("--bbox", nargs=4, type=float, metavar=("W", "S", "E", "N"), help="WGS84 bbox for --xyz")
     ap.add_argument("--gsd", type=float, default=0.3, help="target m/px for --xyz")
+    ap.add_argument("--road-model", choices=["tile2net", "legacy"], default="tile2net",
+                    help="road surface/sidewalk/crosswalk model (legacy = previous version)")
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
@@ -63,7 +65,8 @@ def main():
     img = GeoImage(path)
     print(f"{path}: {img.ds.width}x{img.ds.height}px, CRS {img.crs}, {img.gsd_meters:.3f} m/px, engine={engine}")
     opt = DetectOptions(classes=a.classes, engine=engine, sam3_ok=sam3_ok, tta=not a.fast, threshold=a.threshold, tile_size=a.tile_size,
-                        overlap=max(128, a.tile_size // 6), min_area=a.min_area, regularize=not a.no_regularize)
+                        overlap=max(128, a.tile_size // 6), min_area=a.min_area, regularize=not a.no_regularize,
+                        road_model=a.road_model)
     t0 = time.time()
     feats = detect_image(img, opt, lambda p, m: print(f"\r[{p*100:5.1f}%] {m}".ljust(60), end="", flush=True))
     print()

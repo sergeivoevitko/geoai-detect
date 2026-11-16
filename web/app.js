@@ -2,11 +2,11 @@
 "use strict";
 const $ = (s) => document.querySelector(s);
 const COLORS = {
-  building: "#e6194b", road: "#f58231", road_centerline: "#ffd60a", sidewalk: "#b06cff",
+  building: "#e6194b", road: "#f58231", road_centerline: "#ffd60a", sidewalk: "#b06cff", crosswalk: "#00e5ff",
   parking: "#8c8c8c", tree: "#2fbf4a", "solar panel": "#1e5bff", water: "#00b7ff",
 };
 const EXTRA = ["#911eb4", "#46f0f0", "#bcf60c", "#008080", "#9a6324", "#f032e6"];
-const LABELS = { building: "Buildings", road: "Roads", road_centerline: "Road centerlines", sidewalk: "Sidewalks",
+const LABELS = { building: "Buildings", road: "Roads", road_centerline: "Road centerlines", sidewalk: "Sidewalks", crosswalk: "Crosswalks",
   parking: "Parking lots", tree: "Trees", "solar panel": "Solar panels" };
 // same 7-parameter transformation pyproj/PROJ use for EPSG:2039 (0.5 m accuracy); matches pyproj to the cm
 proj4.defs("EPSG:2039", "+proj=tmerc +lat_0=31.7343936111111 +lon_0=35.2045169444444 +k=1.0000067 " +
@@ -323,7 +323,7 @@ function redraw() {
     features: state.features.features.filter(f => !state.hidden.has(f.properties.class)) });
 }
 function sortedClasses(counts) {
-  const order = ["building", "road", "road_centerline", "sidewalk", "parking", "tree", "solar panel"];
+  const order = ["building", "road", "road_centerline", "sidewalk", "crosswalk", "parking", "tree", "solar panel"];
   return Object.keys(counts).sort((a, b) => ((order.indexOf(a) + 1) || 99) - ((order.indexOf(b) + 1) || 99));
 }
 function renderLayers() {

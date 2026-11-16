@@ -60,7 +60,7 @@ _jobs: dict[str, dict] = {}
 _rasters: dict[str, GeoImage] = {}
 _features: list[dict] | None = None
 
-CLASS_ORDER = ["building", "road", "road_centerline", "sidewalk", "parking", "tree", "solar panel"]
+CLASS_ORDER = ["building", "road", "road_centerline", "sidewalk", "crosswalk", "parking", "tree", "solar panel"]
 
 
 # ================================================================ persistence
@@ -135,7 +135,9 @@ def config():
                 {"id": "road", "name": "Roads", "default": True,
                  "options": [{"id": "centerlines", "name": "Centerlines", "default": True},
                              {"id": "sidewalks", "name": "Sidewalks", "default": True},
-                             {"id": "parking", "name": "Parking lots", "default": True}]},
+                             {"id": "crosswalks", "name": "Crosswalks", "default": True},
+                             {"id": "parking", "name": "Parking lots", "default": True},
+                             {"id": "legacy_roads", "name": "Use previous road model", "default": False}]},
                 {"id": "tree", "name": "Trees", "default": True},
                 {"id": "solar panel", "name": "Solar panels", "default": True},
             ]}
@@ -318,7 +320,7 @@ class DetectReq(BaseModel):
     source: str
     bbox: list[float]                   # rectangle, WGS84 west, south, east, north
     classes: list[str]
-    options: dict = {}                  # centerlines / sidewalks / parking: bool
+    options: dict = {}                  # centerlines / sidewalks / crosswalks / parking / legacy_roads: bool
     gsd: float = 0.15                   # services: download resolution (m/px)
     custom: list[str] = []              # extra free-text classes (open-vocabulary detector)
 
@@ -413,7 +415,8 @@ def start_detect(req: DetectReq):
     jid = rid
     rdir = os.path.join(WORK, "runs", rid); os.makedirs(rdir)
     _jobs[jid] = {"status": "running", "progress": 0.0, "message": "Starting…", "cancel": False, "run": rid}
-    opt_flags = {"centerlines": True, "sidewalks": True, "parking": True, **(req.options or {})}
+    opt_flags = {"centerlines": True, "sidewalks": True, "crosswalks": True, "parking": True,
+                 "legacy_roads": False, **(req.options or {})}
 
     def run():
         t0 = time.time()
@@ -428,7 +431,8 @@ def start_detect(req: DetectReq):
             aoi = _prepare_aoi(s, _expand_bbox(req.bbox, MARGIN_M), req.gsd, os.path.join(rdir, "aoi.tif"), prog)
             img = GeoImage(aoi)
             opt = DetectOptions(classes=classes, engine="hybrid", overlap=170,
-                                sidewalks=opt_flags["sidewalks"])
+                                sidewalks=opt_flags["sidewalks"], crosswalks=opt_flags["crosswalks"],
+                                road_model="legacy" if opt_flags["legacy_roads"] else "tile2net")
             prog(0.05, "Loading AI models…")
             feats = detect_image(img, opt, lambda p, m: prog(0.05 + 0.93 * p, m))
             if not opt_flags["centerlines"]:

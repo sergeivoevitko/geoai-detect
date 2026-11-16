@@ -35,6 +35,9 @@ class DetectOptions:
     dense_building_frac: float = 0.3   # "auto": run the fine pass when buildings cover more than this
     spur_min_m: float = 6.0            # m, prune centerline side-branches shorter than this
     sidewalks: bool = True             # split road surface into carriageway + sidewalk
+    road_model: str = "tile2net"       # road surface/sidewalks/crosswalks: tile2net | legacy
+    ped_gsd: str | float = "auto"      # Tile2Net resolution: auto (0.15 m on sharp imagery, else 0.3) | m/px
+    crosswalks: bool = True            # Tile2Net only: crosswalk polygons
     sidewalk_max_m: float = 4.5        # m, widest sidewalk strip considered
     review_threshold: float = 0.6      # segments with lower agreement are flagged for review
     threshold: float = 0.3
@@ -123,11 +126,25 @@ def _detect_landcover(img: GeoImage, opt: DetectOptions, classes: list[str], pro
         stuff = is_stuff(label)
         if landcover.landcover_class(label) == "road" and opt.road_graph:
             from .roads import extract_roads
-            cl, mask, side, parking = extract_roads(img, cls_map, idx_of, opt,
-                                                    lambda p, m: progress(0.82 + 0.1 * p, m))
+            t2n = opt.road_model == "tile2net"
+            ropt = DetectOptions(**{**opt.__dict__, "sidewalks": False}) if t2n else opt
+            span = 0.04 if t2n else 0.1
+            cl, mask, side, parking = extract_roads(img, cls_map, idx_of, ropt,
+                                                    lambda p, m: progress(0.82 + span * p, m))
+            cross = np.zeros_like(mask)
+            if t2n:
+                # Tile2Net draws the road surface, sidewalks and crosswalks; SAM-Road (above)
+                # still gives the centerlines and the parking lots
+                from . import tile2net
+                tm = tile2net.segment(img, opt.ped_gsd, lambda p, m: progress(0.86 + 0.06 * p, m))
+                cross = tm["crosswalk"] if opt.crosswalks else cross
+                mask = tm["road"] | tm["crosswalk"]
+                side = tm["sidewalk"] if opt.sidewalks else np.zeros_like(mask)
+                parking = parking & ~(mask | side)
             for c in cl:
                 out.append({"label": f"{label}_centerline", "source": "auto", **c})
-            for extra, emask, emin in (("sidewalk", side, 2.0), ("parking", parking, 150.0)):
+            for extra, emask, emin in (("sidewalk", side, 2.0), ("crosswalk", cross, 3.0),
+                                       ("parking", parking, 150.0)):
                 if not emask.any():
                     continue
                 emask = clean_mask(emask, min_pixels=min_px, close_iter=1)
