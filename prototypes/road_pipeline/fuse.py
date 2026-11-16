@@ -18,7 +18,14 @@ base = unary_union([t_road, t_cross])
 cand = s_road.difference(base.buffer(0.3)).difference(t_side).difference(bld.buffer(0.5)).difference(s_park.buffer(1.0))
 cand = cand.buffer(-1.0).buffer(1.0)
 pieces = [p for p in getattr(cand, "geoms", [cand]) if p.area >= 25]
-keep = [p for p in pieces if p.intersection(cl_old).length >= 8 or (p.buffer(1.0).intersection(base).area > 0 and p.area >= 150)]
+def contacts(p):
+    """number of separate places where the piece touches the Tile2Net road"""
+    c = p.exterior.buffer(1.0).intersection(base)
+    c = c.buffer(0.5)
+    return len([g for g in getattr(c, "geoms", [c]) if g.area > 2])
+# gap filling only: a SAM 3 piece must connect road on two separate sides (a gap between road
+# pieces, e.g. a bridge shadow), not just sit next to the road (plazas, yards)
+keep = [p for p in pieces if contacts(p) >= 2]
 added = unary_union(keep)
 fused = unary_union([base, added]).buffer(0.5).buffer(-0.5)
 # ---- centerline fill: SAM-Road segments that run outside the visible road (residential streets the
@@ -42,11 +49,14 @@ seg_fill, n_seg = [], 0
 for ln in getattr(cl_old.difference(fused.buffer(1.0)), "geoms", []):
     if ln.length < 10: continue
     ends = [Point(ln.coords[0]), Point(ln.coords[-1])]
-    if not any(near.contains(e) for e in ends): continue                   # must connect to the network
+    n_conn = sum(near.contains(e) for e in ends)
+    if n_conn == 0 or (n_conn == 1 and ln.length < 30): continue             # connected; short stubs must bridge
     if ln.intersection(s_park.buffer(1.0)).length > 0.3 * ln.length: continue   # parking aisles
     if ln.intersection(bld).length > 0.2 * ln.length: continue
     hw = halfwidth(ln)
-    seg_fill.append(ln.buffer(hw, cap_style=2, join_style=1)); n_seg += 1
+    strip = ln.buffer(hw, cap_style=2, join_style=1)
+    if strip.intersection(t_side).area > 0.3 * strip.area: continue          # plaza / pedestrian area
+    seg_fill.append(strip); n_seg += 1
 cl_added = unary_union(seg_fill).difference(bld.buffer(0.3)).difference(s_park) if seg_fill else None
 if cl_added is not None and not cl_added.is_empty:
     fused = unary_union([fused, cl_added]).buffer(0.5).buffer(-0.5)
