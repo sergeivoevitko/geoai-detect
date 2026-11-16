@@ -80,15 +80,113 @@ def _largest(g):
     return g
 
 
+def _axial(a: float) -> float:
+    return a % 180.0
+
+
+def _adiff(a: float, b: float) -> float:
+    d = abs(_axial(a) - _axial(b))
+    return min(d, 180.0 - d)
+
+
+def _aligned_share(p: Polygon, main: float, tol_deg: float = 15.0) -> float:
+    """Share of the outline (after light simplification) running parallel or perpendicular to main."""
+    c = list(p.simplify(0.5).exterior.coords)
+    tot = ok = 0.0
+    for a, b in zip(c[:-1], c[1:]):
+        L = math.dist(a, b)
+        ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+        tot += L
+        if min(_adiff(ang, main), _adiff(ang, main + 90)) <= tol_deg:
+            ok += L
+    return ok / tot if tot else 0.0
+
+
+def snap_outline(p: Polygon, main: float | None = None, tol: float = 0.75, angle_tol: float = 15.0,
+                 min_edge: float = 0.0) -> Polygon:
+    """Straight walls: simplify, snap each edge to the main direction or its perpendicular when it
+    is within angle_tol, keep other edges' own direction, merge consecutive edges that share a
+    direction, and rebuild the corners where neighbouring walls meet (like ArcGIS Regularize
+    Building Footprint). Returns the simplified outline if the result is not a valid polygon."""
+    base = p.simplify(tol, preserve_topology=True)
+    if base.is_empty or base.geom_type != "Polygon":
+        return p
+    if main is None:
+        main = _main_angle(p)
+    c = list(base.exterior.coords)[:-1]
+    if len(c) < 4:
+        return base
+    # edges as (mid point, angle, length)
+    edges = []
+    for a, b in zip(c, c[1:] + c[:1]):
+        L = math.dist(a, b)
+        if L < 1e-6:
+            continue
+        ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+        for target in (main, main + 90):
+            if _adiff(ang, target) <= angle_tol:
+                ang = _axial(target); break
+        else:
+            ang = _axial(ang)
+        edges.append([((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), ang, L])
+    # merge consecutive edges with the same direction (length-weighted line through both)
+    merged = True
+    while merged and len(edges) > 3:
+        merged = False
+        for i in range(len(edges)):
+            j = (i + 1) % len(edges)
+            if _adiff(edges[i][1], edges[j][1]) < 1.0 or edges[j][2] < min_edge:
+                (m1, a1, l1), (m2, a2, l2) = edges[i], edges[j]
+                w = l1 + l2
+                ang = a1 if l1 >= l2 else a2
+                edges[i] = [((m1[0] * l1 + m2[0] * l2) / w, (m1[1] * l1 + m2[1] * l2) / w), ang, w]
+                del edges[j]
+                merged = True
+                break
+    if len(edges) < 3:
+        return base
+    pts = []
+    for i in range(len(edges)):
+        (m1, a1, _), (m2, a2, _) = edges[i - 1], edges[i]
+        t1, t2 = math.radians(a1), math.radians(a2)
+        d1, d2 = (math.cos(t1), math.sin(t1)), (math.cos(t2), math.sin(t2))
+        den = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(den) < math.sin(math.radians(10)):      # near-parallel neighbours: step between them
+            pts.append(m1 if not pts else pts[-1])
+            pts.append(m2)
+            continue
+        t = ((m2[0] - m1[0]) * d2[1] - (m2[1] - m1[1]) * d2[0]) / den
+        pts.append((m1[0] + d1[0] * t, m1[1] + d1[1] * t))
+    r = Polygon(pts)
+    if not r.is_valid:
+        r = r.buffer(0)
+        r = _largest(r) if not r.is_empty else r
+    if r.is_empty or r.geom_type != "Polygon" or \
+            r.intersection(p).area / max(r.union(p).area, 1e-9) < 0.8:
+        return base
+    return r
+
+
+def _is_round(p: Polygon) -> bool:
+    """A really round outline: compact, and every boundary point about the same distance from the
+    centre (an irregular compact blob is not round)."""
+    sm = p.simplify(0.3)
+    if 4 * math.pi * sm.area / max(sm.length, 1e-9) ** 2 < 0.8:
+        return False
+    c = p.centroid
+    ring = p.exterior
+    d = np.array([c.distance(ring.interpolate(t, normalized=True)) for t in np.linspace(0, 1, 72, endpoint=False)])
+    return float(d.std() / max(d.mean(), 1e-9)) < 0.07
+
+
 def regularize_building(p: Polygon, tol: float) -> Polygon:
     """Make building footprints look like buildings.
 
     * nearly rectangular -> the rectangle
-    * otherwise walls are squared to the building's own main direction: the outline is redrawn on
-      a 25 cm grid aligned with the building and jogs smaller than ~2 m are removed, so walls are
-      straight and corners are right angles (kept only when it still matches the shape, IoU >= 0.85)
     * round buildings (towers, domes) keep a smooth curve
-    * anything else: small notches/spikes removed, edges straightened
+    * everything else -> wall snapping: walls near the main direction or its perpendicular become
+      exactly parallel/perpendicular (right-angle corners), other walls stay straight in their own
+      direction, short jogs are merged and corners are rebuilt where neighbouring walls meet
     """
     p = _largest(p.buffer(0))
     mrr = p.minimum_rotated_rectangle
@@ -100,34 +198,36 @@ def regularize_building(p: Polygon, tol: float) -> Polygon:
         return s if s.is_valid and not s.is_empty else p
     p = Polygon(p.exterior, [h for h in p.interiors if Polygon(h).area >= 25]).buffer(0)
     p = _largest(p)
-    if 4 * math.pi * p.area / p.length ** 2 > 0.75:     # round
+    if _is_round(p):                                     # round towers, domes
         return _chaikin_poly(p.simplify(0.5))
-    from rasterio import features
-    from rasterio.transform import from_origin
-    from scipy import ndimage
-    from shapely import affinity
-    from shapely.geometry import shape
-    step, pad = 0.25, 2
-    ang, c = _main_angle(p), p.centroid
-    q = affinity.rotate(p, -ang, origin=c)
-    bx0, by0, bx1, by1 = q.bounds
-    W, H = int((bx1 - bx0) / step) + 2 * pad, int((by1 - by0) / step) + 2 * pad
-    if W * H < 50_000_000:
-        tr = from_origin(bx0 - pad * step, by1 + pad * step, step, step)
-        m = features.rasterize([(q, 1)], out_shape=(H, W), transform=tr).astype(bool)
-        k = 4                                            # 2 m jogs at 25 cm
-        m = ndimage.binary_closing(ndimage.binary_opening(m, iterations=k), iterations=k)
-        shp = [shape(g) for g, _ in features.shapes(m.astype(np.uint8), mask=m, transform=tr)]
-        if shp:
-            r = max(shp, key=lambda g: g.area)
-            r = Polygon(r.exterior, [h for h in r.interiors if Polygon(h).area >= 25]).simplify(0.01)
-            r = affinity.rotate(r, ang, origin=c)
-            if r.is_valid and r.intersection(p).area / max(r.union(p).area, 1e-9) >= 0.85:
-                return r
-    s = p.buffer(1.0, join_style=2).buffer(-1.0, join_style=2).buffer(-0.8, join_style=2).buffer(0.8, join_style=2)
-    s = _largest(s) if not s.is_empty else p
-    s = s.simplify(max(tol, 0.6), preserve_topology=True)
-    return s if s.is_valid and not s.is_empty else p
+    ang = _main_angle(p)
+    # light clean-up first: small notches and spikes (not for small or thin buildings it would eat)
+    q0 = p.buffer(0.8, join_style=2).buffer(-0.8, join_style=2).buffer(-0.6, join_style=2).buffer(0.6, join_style=2)
+    q0 = _largest(q0) if not q0.is_empty else p
+    if q0.area < 0.85 * p.area:
+        q0 = p
+    r = snap_outline(q0, ang, tol=max(tol, 0.75), min_edge=1.0)
+    if not r.is_valid or r.is_empty or r.intersection(p).area / max(r.union(p).area, 1e-9) < 0.75:
+        r = snap_outline(p, ang, tol=0.4, min_edge=0.5)
+    return r if r.is_valid and not r.is_empty else p
+
+
+def regularize_panel(p: Polygon) -> Polygon:
+    """Solar panels / collectors: a rectangle when the shape is close to one, otherwise straight
+    edges snapped to the panel row direction."""
+    p = _largest(p.buffer(0))
+    if p.is_empty:
+        return p
+    mrr = p.minimum_rotated_rectangle
+    if mrr.area > 0 and p.area / mrr.area > 0.7:
+        return mrr
+    x0, y0, x1, y1 = p.bounds
+    if max(x1 - x0, y1 - y0) < 1e-3:
+        return p.simplify(1e-6, preserve_topology=True)
+    q = p.buffer(0.3, join_style=2).buffer(-0.3, join_style=2)
+    q = _largest(q) if not q.is_empty else p
+    r = snap_outline(q, _main_angle(q), tol=0.3, angle_tol=20.0, min_edge=0.4)
+    return r if r.is_valid and not r.is_empty else q
 
 
 def merge_instances(items: list[dict], iou_thr: float = 0.3, contain_thr: float = 0.6) -> list[dict]:

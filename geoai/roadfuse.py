@@ -705,6 +705,21 @@ def crosswalks_from_stripes(img, blob, road):
     return [p for r in out for p in polys(r) if p.area >= 3]
 
 
+def smooth_crosswalks(g):
+    """Keep the detected crosswalk shape; remove only the zigzag the stripes leave on its edge:
+    close the gaps between stripes, straighten the edges, soften the corners slightly."""
+    g = g.buffer(0.6, join_style=2).buffer(-0.6, join_style=2)          # fill between stripes
+    g = g.buffer(-0.4, join_style=2).buffer(0.4, join_style=2)          # cut small spikes
+    g = g.simplify(0.5, preserve_topology=True)                         # straight edges
+    out = []
+    for p in polys(g):
+        if p.area < 3:
+            continue
+        q = Polygon(chaikin_ring(p.exterior.coords, 1)).buffer(0)       # one light corner pass
+        out += polys(q)
+    return unary_union(out) if out else EMPTY
+
+
 # ------------------------------------------------------------------ main
 def build(img, t2n: dict, samroad_lines: list, legacy_road: np.ndarray, building: np.ndarray,
           sam3_road=None, sam3_parking=None, legacy_parking: np.ndarray | None = None,
@@ -749,10 +764,8 @@ def build(img, t2n: dict, samroad_lines: list, legacy_road: np.ndarray, building
     parking = park_ref.difference(unary_union([road, side]).buffer(0.5)) if not park_ref.is_empty else EMPTY
     parking = smooth_area(parking.buffer(-1.5).buffer(1.5), min_area=60.0)
     cross = t_cross.intersection(road.buffer(0.5)) if crosswalks else EMPTY
-    cw = []
-    for p in polys(cross):
-        cw += crosswalks_from_stripes(img, p, road) or crosswalk_shape(p, road)
-    cross = unary_union(cw) if cw else EMPTY
+    # crosswalks keep their detected shape; only the zigzag edge (the stripes) is smoothed away
+    cross = smooth_crosswalks(cross) if not cross.is_empty else EMPTY
 
     feats = []
     for p in polys(road):

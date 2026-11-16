@@ -14,7 +14,7 @@ from shapely.ops import unary_union
 
 from . import landcover, models
 from .raster import GeoImage
-from .vectorize import clean_mask, mask_to_polygons, postprocess, is_stuff
+from .vectorize import clean_mask, mask_to_polygons, postprocess, is_stuff, regularize_panel
 
 
 @dataclass
@@ -117,7 +117,7 @@ def detect_image(img: GeoImage, opt: DetectOptions, progress: ProgressFn | None 
             g = f["geometry"].intersection(roofs)
             for p in ([g] if g.geom_type == "Polygon" else [q for q in getattr(g, "geoms", []) if q.geom_type == "Polygon"]):
                 if p.area >= 0.3:
-                    features.append({"label": solar_classes[0], "geometry": p, "score": f["score"], "source": "auto"})
+                    features.append({"label": solar_classes[0], "geometry": regularize_panel(p), "score": f["score"], "source": "auto"})
         if drop_buildings:
             features = [f for f in features if landcover.landcover_class(f["label"]) != "building"]
     elif solar_classes:
@@ -130,7 +130,7 @@ def detect_image(img: GeoImage, opt: DetectOptions, progress: ProgressFn | None 
             # panels on red-tile roofs. They overlap only ~50%, so both are used and merged.
             sol = merge(sol, detect_yolo(img, roofs, progress=lambda p, m: progress(0.9 * share, m)), img.gsd)
         for it in sol:
-            features.append({"label": solar_classes[0], "geometry": it["geometry"], "score": it["score"],
+            features.append({"label": solar_classes[0], "geometry": regularize_panel(it["geometry"]), "score": it["score"],
                              "source": "auto"})
         if drop_buildings:
             features = [f for f in features if landcover.landcover_class(f["label"]) != "building"]
